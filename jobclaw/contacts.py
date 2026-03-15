@@ -12,7 +12,9 @@ Output: data/enriched.json
 """
 import json
 import time
+import threading
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from jobclaw.logger import get_logger
 from jobclaw import config
@@ -339,40 +341,45 @@ def find_field_leads(resume: dict) -> list[dict]:
                 seen.add(key)
                 all_leads.append(lead)
 
-    # 1. GitHub repo contributors (enrich top 3 per repo with real profile data)
-    repos = sources.get("github_repos", [])[:5]
-    for repo in repos:
+    # All 4 sources are independent — fetch in parallel
+    repos     = sources.get("github_repos", [])[:5]
+    devto_tags = sources.get("devto_tags", [])[:3]
+    so_tags   = sources.get("stackoverflow_tags", [])[:2]
+    hn_terms  = sources.get("hn_search_terms", [])[:2]
+
+    def _fetch_github_repo(repo: str) -> list[dict]:
         raw = _github_repo_contributors(repo)
         enriched = []
-        for c in raw[:3]:
-            profile = _github_enrich_user(c["username"])
-            enriched.append({**c, **profile, "source": c["source"], "source_detail": c["source_detail"]})
-            time.sleep(0.4)  # stay within unauthenticated rate limit
-        _add(enriched)
-        if enriched:
-            log.info(f"  GitHub {repo}: {len(enriched)} contributors")
+        # Enrich top 3 contributors in parallel within each repo
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            profile_futures = {ex.submit(_github_enrich_user, c["username"]): c for c in raw[:3]}
+            for pf in as_completed(profile_futures):
+                c = profile_futures[pf]
+                profile = pf.result() or {}
+                enriched.append({**c, **profile, "source": c["source"], "source_detail": c["source_detail"]})
+        return enriched
 
-    # 2. Dev.to authors (completely free, no rate limits)
-    for tag in sources.get("devto_tags", [])[:3]:
-        authors = _devto_authors(tag)[:6]
-        _add(authors)
-        if authors:
-            log.info(f"  dev.to #{tag}: {len(authors)} authors")
+    tasks: list[tuple[str, callable]] = []
+    for repo in repos:
+        tasks.append((f"github:{repo}", lambda r=repo: _fetch_github_repo(r)))
+    for tag in devto_tags:
+        tasks.append((f"devto:{tag}", lambda t=tag: _devto_authors(t)[:6]))
+    for tag in so_tags:
+        tasks.append((f"so:{tag}", lambda t=tag: _stackoverflow_top_users(t)[:5]))
+    for term in hn_terms:
+        tasks.append((f"hn:{term}", lambda t=term: _hn_field_users(t)[:6]))
 
-    # 3. Stack Overflow top answerers (throttle between calls)
-    for tag in sources.get("stackoverflow_tags", [])[:2]:
-        experts = _stackoverflow_top_users(tag)[:5]
-        _add(experts)
-        if experts:
-            log.info(f"  Stack Overflow #{tag}: {len(experts)} experts")
-        time.sleep(1.5)  # SO throttles aggressively without a key
-
-    # 4. Hacker News active users
-    for term in sources.get("hn_search_terms", [])[:2]:
-        users = _hn_field_users(term)[:6]
-        _add(users)
-        if users:
-            log.info(f"  HN '{term}': {len(users)} users")
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(fn): label for label, fn in tasks}
+        for future in as_completed(futures):
+            label = futures[future]
+            try:
+                results = future.result()
+                _add(results)
+                if results:
+                    log.info(f"  {label}: {len(results)} leads")
+            except Exception as e:
+                log.debug(f"  {label} failed: {e}")
 
     log.info(f"Total field leads: {len(all_leads)} across "
              f"{len(repos)} GitHub repos, dev.to, Stack Overflow, HN")
@@ -446,19 +453,32 @@ def run_contacts(resume: dict) -> list[dict]:
 
     hm_titles = resume.get("hm_titles_above_me", [])
 
+    # Pre-fetch Apollo for all unique companies in parallel (3 workers)
+    unique_companies = list(dict.fromkeys(j.get("company", "") for j in scored if j.get("company")))
+    apollo_cache: dict[str, list[dict]] = {}
+    log.info(f"Fetching Apollo contacts for {len(unique_companies)} companies (3 parallel workers)...")
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        apollo_futures = {executor.submit(_apollo_search, c, hm_titles): c for c in unique_companies}
+        for future in as_completed(apollo_futures):
+            company = apollo_futures[future]
+            try:
+                apollo_cache[company] = future.result()
+            except Exception:
+                apollo_cache[company] = []
+
     for i, job in enumerate(scored):
         company = job.get("company", "")
         signals = job.get("signals", {})
         log.info(f"({i+1}/{len(scored)}) {company} — {job.get('title', '')}")
 
-        # 1. LinkedIn connections
+        # 1. LinkedIn connections (in-memory, instant)
         my_conns = config.find_connections_at(company, conn_index)
         job["my_connections"] = my_conns[:5]
         if my_conns:
             log.info(f"  🤝 {len(my_conns)} connection(s) at {company}")
 
-        # 2. Apollo (uses resume-derived hiring manager titles)
-        apollo = _apollo_search(company, hm_titles)
+        # 2. Apollo (pre-fetched above)
+        apollo = apollo_cache.get(company, [])
         job["apollo_contacts"] = apollo[:5]
         if apollo:
             log.info(f"  🔍 Apollo: {len(apollo)} contacts")

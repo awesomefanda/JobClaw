@@ -16,6 +16,7 @@ import csv
 import hashlib
 import re
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -143,12 +144,13 @@ def _scrape_google(resume: dict) -> list[dict]:
     if "google" not in scout.get("platforms", []):
         return []
 
-    # Scrape raw HTML
-    scrape_google_jobs(
-        search_term=" ".join(resume.get("target_roles", ["software engineer"])),
-        max_jobs=scout.get("max_results", 20),
-        delay=3.0
-    )
+    # Scrape raw HTML — one search per target role (not all joined into one broken string)
+    for role in resume.get("target_roles", ["software engineer"])[:3]:
+        scrape_google_jobs(
+            search_term=role,
+            max_jobs=scout.get("max_results", 20),
+            delay=3.0,
+        )
 
     # Parse to structured data
     parsed_jobs = parse_all_google_jobs()
@@ -1077,46 +1079,37 @@ def run_scout(resume: dict) -> int:
     existing = _existing_ids()
     log.info(f"Existing jobs in CSV: {len(existing)}")
 
-    all_jobs: list[dict] = []
-
-    # Source 1: JobSpy (Indeed, LinkedIn, Glassdoor, ZipRecruiter)
-    all_jobs.extend(_scrape_jobspy(resume))
-
-    # Source 1b: Google Careers (custom scraper)
-    all_jobs.extend(_scrape_google(resume))
-
-    # Source 2: Greenhouse boards
     gh = resume.get("scout", {}).get("greenhouse_boards", [])
-    if gh:
-        all_jobs.extend(_scrape_greenhouse(gh))
-
-    # Source 3: Lever boards
     lv = resume.get("scout", {}).get("lever_boards", [])
-    if lv:
-        all_jobs.extend(_scrape_lever(lv))
 
-    # Source 4: YC Work at a Startup
-    all_jobs.extend(_scrape_yc_jobs(resume.get("target_roles", [])))
+    # All sources are independent — run in parallel
+    sources = {
+        "jobspy":          lambda: _scrape_jobspy(resume),
+        "google_careers":  lambda: _scrape_google(resume),
+        "greenhouse":      lambda: _scrape_greenhouse(gh) if gh else [],
+        "lever":           lambda: _scrape_lever(lv) if lv else [],
+        "yc":              lambda: _scrape_yc_jobs(resume.get("target_roles", [])),
+        "hn_hiring":       lambda: _scrape_hn_hiring(resume.get("technical_skills", ["python"])),
+        "wellfound":       lambda: _scrape_wellfound(resume.get("target_roles", [])),
+        "linkedin_posts":  lambda: _scrape_linkedin_hiring_posts(resume),
+        "blind_feed":      lambda: _scrape_blind_offers(resume),
+        "rss_feeds":       lambda: _scrape_rss_feeds(resume),
+        "levels_fyi":      lambda: _scrape_levels_jobs(resume),
+    }
 
-    # Source 5: Hacker News "Who's Hiring"
-    all_jobs.extend(_scrape_hn_hiring(resume.get("technical_skills", ["python"])))
+    all_jobs: list[dict] = []
+    log.info(f"Scraping {len(sources)} sources in parallel (5 workers)...")
 
-    # Source 6: Wellfound (AngelList)
-    all_jobs.extend(_scrape_wellfound(resume.get("target_roles", [])))
-
-    # Source 7: LinkedIn Hiring Posts (PROACTIVE — people saying "I'm hiring")
-    all_jobs.extend(_scrape_linkedin_hiring_posts(resume))
-
-    # Source 8: Blind Offer Feed (companies confirmed closing candidates NOW)
-    all_jobs.extend(_scrape_blind_offers(resume))
-
-    # Source 9: RSS job feeds (WeWorkRemotely, Himalayas, RealWorkFromAnywhere, RemoteOK, Remotive)
-    all_jobs.extend(_scrape_rss_feeds(resume))
-
-    # Source 10: Levels.fyi jobs (salary data + level-aware job listings)
-    levels_jobs = _scrape_levels_jobs(resume)
-    log.info(f"Levels.fyi scraper returned {len(levels_jobs)} jobs")
-    all_jobs.extend(levels_jobs)
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(fn): name for name, fn in sources.items()}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                jobs = future.result()
+                all_jobs.extend(jobs)
+                log.info(f"  ✓ {name}: {len(jobs)} jobs")
+            except Exception as e:
+                log.warning(f"  ✗ {name} failed: {e}")
 
     # Dedup + filter
     seen = set()

@@ -17,9 +17,12 @@ log = get_logger("config")
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
+LOCAL = ROOT / ".local"   # gitignored — personal files (resume, connections, .env)
 DATA.mkdir(exist_ok=True)
+LOCAL.mkdir(exist_ok=True)
 
 load_dotenv(ROOT / ".env")
+load_dotenv(LOCAL / ".env", override=True)  # .local/.env overrides root .env
 
 # ── Env helpers ────────────────────────────────────────────────
 
@@ -134,8 +137,8 @@ def load_resume() -> dict:
 
     Priority:
       1. data/parsed_resume.json (cached from previous run)
-      2. resume.json (manual entry, MariyaSha style)
-      3. resume.pdf / resume.docx (auto-parsed via Groq)
+      2. .local/resume.json or resume.json (manual entry)
+      3. .local/resume.{pdf,docx,...} then resume.{pdf,docx,...} (auto-parsed via Groq)
     """
     # 1. Cached parsed resume
     if PARSED_RESUME.exists():
@@ -144,28 +147,28 @@ def load_resume() -> dict:
             log.info(f"Loaded cached resume: {data.get('name', 'unknown')}")
             return data
 
-    # 2. Manual JSON resume
-    json_path = ROOT / "resume.json"
-    if json_path.exists():
-        data = json.loads(json_path.read_text())
-        if data.get("name") or data.get("summary"):
-            log.info(f"Loaded resume.json: {data.get('name', 'unknown')}")
-            # Cache it
-            PARSED_RESUME.write_text(json.dumps(data, indent=2))
-            return data
+    # 2. Manual JSON resume (.local first, then root)
+    for json_path in [LOCAL / "resume.json", ROOT / "resume.json"]:
+        if json_path.exists():
+            data = json.loads(json_path.read_text())
+            if data.get("name") or data.get("summary"):
+                log.info(f"Loaded {json_path.relative_to(ROOT)}: {data.get('name', 'unknown')}")
+                PARSED_RESUME.write_text(json.dumps(data, indent=2))
+                return data
 
-    # 3. PDF or DOCX — auto-parse
+    # 3. PDF or DOCX — check .local first, then root
     for ext in ("pdf", "docx", "doc", "txt"):
-        candidate = ROOT / f"resume.{ext}"
-        if candidate.exists():
-            log.info(f"Found {candidate.name} — extracting text...")
-            text = _extract_resume_text(candidate)
-            if not text:
-                log.warning(f"Could not extract text from {candidate.name}")
-                continue
-            log.info("Parsing resume via Groq (one-time)...")
-            data = _parse_resume_with_groq(text)
-            if data:
+        for search_dir in (LOCAL, ROOT):
+            candidate = search_dir / f"resume.{ext}"
+            if candidate.exists():
+                log.info(f"Found {candidate.relative_to(ROOT)} — extracting text...")
+                text = _extract_resume_text(candidate)
+                if not text:
+                    log.warning(f"Could not extract text from {candidate.name}")
+                    continue
+                log.info("Parsing resume via Groq (one-time)...")
+                data = _parse_resume_with_groq(text)
+                if data:
                 # Auto-generate smart defaults based on parsed level
                 level = data.get("current_level", "senior")
                 is_mgr = data.get("is_manager", False)
@@ -196,15 +199,19 @@ def load_resume() -> dict:
                 log.info(f"Review/edit: data/parsed_resume.json")
                 return data
 
-    log.error("No resume found. Place resume.pdf, resume.docx, or resume.json in project root.")
+    log.error("No resume found. Place resume.pdf / resume.docx / resume.json in .local/ or project root.")
     return {}
 
 
 # ── Connections CSV ────────────────────────────────────────────
 
 def load_connections() -> dict[str, list[dict]]:
-    """Load LinkedIn connections CSV. Returns {company_lower: [{name, position, email}]}"""
-    csv_path = ROOT / "connections.csv"
+    """Load LinkedIn connections CSV. Returns {company_lower: [{name, position, email}]}
+    Looks in .local/connections.csv first, then connections.csv in root.
+    """
+    csv_path = LOCAL / "connections.csv"
+    if not csv_path.exists():
+        csv_path = ROOT / "connections.csv"
     if not csv_path.exists():
         log.info("No connections.csv found — network matching disabled")
         return {}

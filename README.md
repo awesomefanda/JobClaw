@@ -6,10 +6,10 @@ Drop your resume. Get an Excel report with ranked leads, contacts, salary data, 
 
 ```bash
 pip install -r requirements.txt
-playwright install chromium    # for Google Careers scraping
-cp .env.example .env           # add GROQ_API_KEY (free at console.groq.com)
-cp ~/Downloads/resume.pdf .    # drop your resume (PDF or DOCX)
-python run.py                  # → open data/reports/*.xlsx
+playwright install chromium      # for Google Careers scraping
+cp .env.example .env             # add GROQ_API_KEY (free at console.groq.com)
+cp ~/Downloads/resume.pdf .local/   # personal files live in .local/ (gitignored)
+python run.py                    # → open data/reports/*.xlsx
 ```
 
 No JSON to edit. No forms. JobClaw reads your resume, infers your level, what titles to search, who hires people like you, and what to look for on Blind. Works for ICs (Staff, Principal) and managers (Director, VP) equally.
