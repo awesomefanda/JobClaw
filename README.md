@@ -34,11 +34,14 @@ JobClaw infers EVERYTHING from the resume:
 Cached at data/parsed_resume.json — edit if you want, but you don't have to.
 ```
 
-### Phase 1: DISCOVER (8 sources, zero AI cost)
+### Phase 1: DISCOVER (9 sources, zero AI cost)
+
+Inspired by Andrej Karpathy's job scraping methodology: resilient Playwright-based scraping with local HTML caching for offline iteration and LLM analysis.
 
 | # | Source | Method | What It Finds |
 |---|--------|--------|---------------|
-| 1 | **JobSpy** | Indeed, LinkedIn, Google Jobs, Glassdoor, ZipRecruiter | Broadest coverage — 100 results per platform per term |
+| 1 | **JobSpy** | Indeed, LinkedIn, Glassdoor, ZipRecruiter | Broadest coverage — 100 results per platform per term |
+| 1b | **Google Careers** | Playwright scraper (Karpathy-inspired) | Direct from careers.google.com — resilient to bot detection |
 | 2 | **Greenhouse** | Public JSON API (`boards-api.greenhouse.io`) | Direct career pages, no rate limit |
 | 3 | **Lever** | Public JSON API (`api.lever.co`) | Same — fast, direct |
 | 4 | **YC Work at a Startup** | Google fallback | YC-backed startups, founders reachable |
@@ -79,6 +82,7 @@ For each scored company:
 For each match:
   • Apollo People Search (FREE) → HM name + LinkedIn URL
   • Connections CSV → people you know at the company
+  • GitHub CLI Contributors → engineers from similar CLI tools (aws-cli, azure-cli, etc.)
   • Cross-reference all sources
 
 Best contact priority:
@@ -90,8 +94,10 @@ action_score = fit_score
   + 0.20 if source IS a hiring post (named person)
   + 0.15 if Blind confirms company closing candidates
   + 0.15 if hiring post found for company
+  + 0.12 if Levels.fyi offer submissions found
   + 0.10 if hiring post author is your connection (GOLDEN)
   + 0.10 if Apollo found HM
+  + 0.08 if CLI contributors available (networking in same field)
   + 0.05 if recently funded
   + 0.05 if no layoffs
   - 0.10 if Blind red flags
@@ -123,8 +129,8 @@ TIER 6:  Job listing alone (Track B)
 
 | Your Level | Searches for HM posts by | Blind level codes | Platforms |
 |---|---|---|---|
-| Senior Engineer | Managers, Directors | E4, L5, SDE2 | All 5 platforms |
-| Staff / Principal | Directors, VPs | E5, E6, L6, L7, Staff | All 5 platforms + HN |
+| Senior Engineer | Managers, Directors | E4, L5, SDE2 | All 6 platforms |
+| Staff / Principal | Directors, VPs | E5, E6, L6, L7, Staff | All 6 platforms + HN |
 | Director | VPs, SVPs, CTOs | Director, D1, D2 | LinkedIn-heavy |
 | VP+ | CEOs, board posts | VP, SVP | LinkedIn-heavy |
 
@@ -136,6 +142,7 @@ TIER 6:  Job listing alone (Track B)
 ```bash
 git clone https://github.com/yourname/jobclaw.git && cd jobclaw
 pip install -r requirements.txt
+playwright install chromium  # For Google Careers scraping
 ```
 
 ### 2. API Keys
@@ -186,6 +193,7 @@ Review `data/parsed_resume.json` and optionally edit:
 | Apollo People Search | Free (no credits consumed) |
 | JobSpy, Greenhouse, Lever, HN API | Free (open source / public) |
 | Google Search, Levels.fyi, Blind | Free |
+| Playwright (Google Careers) | Free (open source) |
 
 ## Resilience
 

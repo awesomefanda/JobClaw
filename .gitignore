@@ -7,6 +7,8 @@ data/enriched.json
 data/parsed_resume.json
 data/reports/
 data/jobclaw.log
+data/google_jobs/
+data/parsed_google_jobs/
 connections.csv
 __pycache__/
 *.pyc

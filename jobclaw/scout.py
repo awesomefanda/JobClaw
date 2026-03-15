@@ -1,7 +1,8 @@
 """Phase 1 — DISCOVER: aggregate job leads from every source.
 
 Sources:
-  1. JobSpy (Indeed, LinkedIn, Google Jobs, Glassdoor, ZipRecruiter)
+  1. JobSpy (Indeed, LinkedIn, Glassdoor, ZipRecruiter)
+  1b. Google Careers (custom Playwright scraper)
   2. Greenhouse boards (public JSON API)
   3. Lever boards (public JSON API)
   4. Y Combinator "Work at a Startup" (workatastartup.com)
@@ -74,7 +75,7 @@ def _scrape_jobspy(resume: dict) -> list[dict]:
         return []
 
     scout = resume.get("scout", {})
-    platforms = scout.get("platforms", ["indeed", "linkedin", "google"])
+    platforms = [p for p in scout.get("platforms", ["indeed", "linkedin", "google"]) if p != "google"]  # Exclude Google, handled separately
     hours_old = scout.get("hours_old", 72)
     max_results = scout.get("max_results", 50)
     is_remote = resume.get("preferences", {}).get("remote", True)
@@ -125,6 +126,55 @@ def _scrape_jobspy(resume: dict) -> list[dict]:
             })
 
     log.info(f"JobSpy: {len(jobs)} total listings")
+    return jobs
+
+
+# ─── Source 1b: Google Careers ─────────────────────────────────
+
+def _scrape_google(resume: dict) -> list[dict]:
+    try:
+        from .scraper import scrape_google_jobs
+        from .parser import parse_all_google_jobs
+    except ImportError:
+        log.error("Google scraper not available. Install playwright and ensure scraper.py exists.")
+        return []
+
+    scout = resume.get("scout", {})
+    if "google" not in scout.get("platforms", []):
+        return []
+
+    # Scrape raw HTML
+    scrape_google_jobs(
+        search_term=" ".join(resume.get("target_roles", ["software engineer"])),
+        max_jobs=scout.get("max_results", 20),
+        delay=3.0
+    )
+
+    # Parse to structured data
+    parsed_jobs = parse_all_google_jobs()
+
+    # Convert to CSV format
+    jobs = []
+    now = datetime.now().isoformat()
+    for pj in parsed_jobs:
+        jobs.append({
+            "id": pj["id"],
+            "title": pj["title"],
+            "company": pj["company"],
+            "location": pj["location"],
+            "is_remote": "true" if "remote" in pj["location"].lower() else "false",
+            "job_url": pj["url"],
+            "salary_min": "",
+            "salary_max": "",
+            "job_type": "",
+            "description": pj["full_markdown"],
+            "date_posted": "",
+            "source": "google_careers",
+            "founder_email": "",
+            "scraped_at": now,
+        })
+
+    log.info(f"Google Careers: {len(jobs)} listings")
     return jobs
 
 
@@ -850,6 +900,172 @@ def _scrape_rss_feeds(resume: dict) -> list[dict]:
     return jobs
 
 
+# ─── Source 10: Levels.fyi Jobs ───────────────────────────────
+
+def _get_level_equivalencies(resume: dict) -> list[str]:
+    """Get level equivalencies from Levels.fyi to expand search terms.
+    
+    For example, if user is Staff Engineer, find what that level is called
+    at different companies to search for more relevant job titles.
+    """
+    current_level = resume.get("current_level", "staff")
+    target_roles = resume.get("target_roles", [])
+    
+    # Map common levels to search terms
+    level_mappings = {
+        "junior": ["junior", "associate", "entry level", "l1", "l2"],
+        "mid": ["mid", "senior associate", "l3", "l4"],
+        "senior": ["senior", "lead", "l4", "l5", "e4", "e5"],
+        "staff": ["staff", "principal", "l5", "l6", "e5", "e6"],
+        "principal": ["principal", "staff", "senior staff", "l6", "l7", "e6", "e7"],
+        "director": ["director", "engineering director", "d1", "d2"],
+        "senior_director": ["senior director", "vp", "head of"],
+        "vp": ["vp", "vice president", "head of", "svp"],
+        "svp": ["svp", "senior vp", "chief"],
+        "cto": ["cto", "chief technology officer"]
+    }
+    
+    expanded_roles = set(target_roles)  # Start with original roles
+    
+    # Add level-specific variations
+    if current_level in level_mappings:
+        expanded_roles.update(level_mappings[current_level])
+    
+    # Try to get company-specific equivalencies from levels.fyi
+    # This is a simplified approach - in practice, we'd need to scrape
+    # multiple company salary pages to build equivalency mappings
+    
+    return list(expanded_roles)
+
+
+def _scrape_levels_jobs(resume: dict) -> list[dict]:
+    """Scrape Levels.fyi jobs page for relevant positions.
+    
+    Levels.fyi has job listings with salary data and level information.
+    We search for jobs that match the user's target roles and level.
+    """
+    jobs = []
+    now = datetime.now().isoformat()
+    
+    target_roles = resume.get("target_roles", [])
+    blind_level_terms = resume.get("blind_level_terms", [])
+    location = resume.get("location", "san-francisco-bay-area")  # Default to SF
+    
+    # Get expanded roles including level equivalencies
+    expanded_roles = _get_level_equivalencies(resume)
+    
+    # Convert location to levels.fyi slug
+    location_slug = location.lower().replace(" ", "-").replace(",", "")
+    if "san francisco" in location.lower() or "bay area" in location.lower():
+        location_slug = "san-francisco-bay-area"
+    elif "new york" in location.lower():
+        location_slug = "new-york-city"
+    elif "seattle" in location.lower():
+        location_slug = "seattle"
+    else:
+        location_slug = "united-states"  # fallback
+    
+    # Build search queries for levels.fyi jobs
+    queries = []
+    for role in expanded_roles[:2]:  # Limit to 2 roles to speed up
+        # Search for role in specific location with job-specific terms
+        queries.append(f'site:levels.fyi/jobs "{role}" "{location_slug}" apply')
+        queries.append(f'"{role}" site:levels.fyi/jobs "{location_slug}"')
+    
+    log.info(f"Levels.fyi jobs: searching {len(queries)} queries")
+    
+    seen_urls = set()
+    for q in queries:
+        try:
+            results = _search(q, num=5)  # Reduced from 8 to 5
+            log.debug(f"Levels.fyi query '{q}' returned {len(results)} results")
+            for r in results:
+                url = r.get("url", "")
+                if url in seen_urls or "levels.fyi" not in url:
+                    continue
+                seen_urls.add(url)
+                
+                title = r.get("title", "")
+                snippet = r.get("snippet", "")
+                log.debug(f"Found levels.fyi job: {title}")
+                
+                # Extract company and role from title
+                # Formats: "Software Engineer at Google - Levels.fyi"
+                #          "Software Engineer, Android | Adobe | Levels.fyi" 
+                #          "Staff Software Engineer, Activation Platform | Block"
+                title_clean = title.replace(" - Levels.fyi", "").replace(" | Levels.fyi", "").strip()
+                
+                log.debug(f"Processing title: '{title}' -> cleaned: '{title_clean}'")
+                
+                role_part = ""
+                company_part = ""
+                
+                if " at " in title_clean:
+                    # Format: "Software Engineer at Google"
+                    parts = title_clean.split(" at ", 1)
+                    role_part = parts[0].strip()
+                    company_part = parts[1].strip()
+                elif " | " in title_clean:
+                    # Format: "Software Engineer | Company" or "Role | Company | Location"
+                    parts = title_clean.split(" | ")
+                    if len(parts) >= 2:
+                        role_part = parts[0].strip()
+                        company_part = parts[1].strip()
+                elif " - " in title_clean and len(title_clean.split(" - ")) == 2:
+                    # Format: "Role - Company"
+                    parts = title_clean.split(" - ", 1)
+                    role_part = parts[0].strip()
+                    company_part = parts[1].strip()
+                
+                if not role_part or not company_part:
+                    log.debug(f"Could not parse title: '{title_clean}' - no role/company found")
+                    continue
+                    
+                log.debug(f"Parsed: role='{role_part}', company='{company_part}'")
+                
+                # Skip if doesn't match our target roles (be more lenient with expanded roles)
+                role_match = any(tr.lower() in role_part.lower() for tr in target_roles)
+                if not role_match:
+                    # Also check expanded roles
+                    role_match = any(er.lower() in role_part.lower() for er in expanded_roles)
+                
+                if not role_match:
+                    log.debug(f"Role '{role_part}' doesn't match target roles {target_roles} or expanded {expanded_roles}")
+                    continue
+                
+                log.info(f"Found levels.fyi job: {role_part} at {company_part}")
+                
+                jobs.append({
+                    "id": _id(company_part, role_part, location_slug),
+                    "title": role_part,
+                    "company": company_part,
+                    "location": location_slug.replace("-", " ").title(),
+                    "is_remote": "false",  # levels.fyi focuses on specific locations
+                    "job_url": url,
+                    "salary_min": "", "salary_max": "", "job_type": "",
+                    "description": f"Levels.fyi job listing: {snippet}",
+                    "date_posted": "",
+                    "source": "levels_fyi_jobs",
+                    "founder_email": "",
+                    "scraped_at": now,
+                })
+                
+                log.debug(f"Jobs list now has {len(jobs)} items")
+            
+            time.sleep(1)
+        except Exception as e:
+            log.debug(f"Levels.fyi query failed: {e}")
+            continue
+    
+    if jobs:
+        log.info(f"Levels.fyi jobs: {len(jobs)} listings")
+    else:
+        log.debug("Levels.fyi jobs: no listings found")
+    
+    log.debug(f"Returning {len(jobs)} levels.fyi jobs")
+    return jobs
+
+
 # ─── Main entry point ─────────────────────────────────────────
 
 def run_scout(resume: dict) -> int:
@@ -863,8 +1079,11 @@ def run_scout(resume: dict) -> int:
 
     all_jobs: list[dict] = []
 
-    # Source 1: JobSpy (Indeed, LinkedIn, Google Jobs, Glassdoor, ZipRecruiter)
+    # Source 1: JobSpy (Indeed, LinkedIn, Glassdoor, ZipRecruiter)
     all_jobs.extend(_scrape_jobspy(resume))
+
+    # Source 1b: Google Careers (custom scraper)
+    all_jobs.extend(_scrape_google(resume))
 
     # Source 2: Greenhouse boards
     gh = resume.get("scout", {}).get("greenhouse_boards", [])
@@ -894,27 +1113,59 @@ def run_scout(resume: dict) -> int:
     # Source 9: RSS job feeds (WeWorkRemotely, Himalayas, RealWorkFromAnywhere, RemoteOK, Remotive)
     all_jobs.extend(_scrape_rss_feeds(resume))
 
+    # Source 10: Levels.fyi jobs (salary data + level-aware job listings)
+    levels_jobs = _scrape_levels_jobs(resume)
+    log.info(f"Levels.fyi scraper returned {len(levels_jobs)} jobs")
+    all_jobs.extend(levels_jobs)
+
     # Dedup + filter
     seen = set()
     new_jobs = []
+    levels_jobs_kept = 0
     for j in all_jobs:
         jid = j["id"]
         if jid not in existing and jid not in seen:
             seen.add(jid)
             new_jobs.append(j)
+            if j.get("source") == "levels_fyi_jobs":
+                levels_jobs_kept += 1
+
+    log.info(f"After dedup: {len(new_jobs)} jobs total, {levels_jobs_kept} levels.fyi jobs")
 
     new_jobs = _keyword_filter(new_jobs, resume.get("keywords_exclude", []))
+    
+    levels_jobs_after_filter = sum(1 for j in new_jobs if j.get("source") == "levels_fyi_jobs")
+    log.info(f"After keyword filter: {len(new_jobs)} jobs total, {levels_jobs_after_filter} levels.fyi jobs")
 
     # Append to CSV
     file_exists = JOBS_CSV.exists()
+    log.info(f"About to write {len(new_jobs)} jobs to CSV. Levels.fyi jobs: {sum(1 for j in new_jobs if j.get('source') == 'levels_fyi_jobs')}")
+    
     with open(JOBS_CSV, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         if not file_exists:
             writer.writeheader()
         # Strip extra fields (like _poster_name) before writing to CSV
+        levels_jobs_written = 0
         for j in new_jobs:
-            row = {k: j.get(k, "") for k in CSV_FIELDS}
-            writer.writerow(row)
+            if j.get("source") == "levels_fyi_jobs":
+                levels_jobs_written += 1
+            # Ensure all fields are strings and clean them
+            row = {}
+            for k in CSV_FIELDS:
+                value = j.get(k, "")
+                if not isinstance(value, str):
+                    value = str(value)
+                # Remove newlines and normalize whitespace
+                value = value.replace('\n', ' ').replace('\r', ' ').strip()
+                row[k] = value
+            try:
+                writer.writerow(row)
+            except Exception as e:
+                log.warning(f"Failed to write job {j.get('id', 'unknown')}: {e}")
+                continue
+        
+        log.info(f"Levels.fyi jobs written to CSV: {levels_jobs_written}")
 
     log.info(f"New unique jobs: {len(new_jobs)}")
     log.info(f"Total in CSV: {len(existing) + len(new_jobs)}")

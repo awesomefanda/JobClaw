@@ -28,6 +28,7 @@ def env(key: str, default: str = "") -> str:
 
 GROQ_API_KEY    = env("GROQ_API_KEY")
 APOLLO_API_KEY  = env("APOLLO_API_KEY")
+GITHUB_TOKEN    = env("GITHUB_TOKEN")       # optional — raises rate limit from 60 to 5000 req/hr
 MIN_FIT_SCORE   = float(env("MIN_FIT_SCORE", "0.75"))
 GROQ_MODEL      = env("GROQ_MODEL", "llama-3.3-70b-versatile")
 LOG_LEVEL       = env("LOG_LEVEL", "INFO")

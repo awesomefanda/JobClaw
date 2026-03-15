@@ -192,6 +192,19 @@ def _funding_signal(company: str) -> str:
     return ""
 
 
+# ─── 7. Levels.fyi Offer Submissions ─────────────────────────
+
+def _levels_offers(company: str) -> list[str]:
+    """Check for recent offer submissions on Levels.fyi, indicating active hiring."""
+    results = _search(f'site:levels.fyi "{company}" offer OR submission 2025 2026', num=5)
+    offers = []
+    for r in results:
+        s = r.get("snippet", "").lower()
+        if any(kw in s for kw in ["offer", "submitted", "accepted", "tc", "compensation"]):
+            offers.append(r["snippet"][:200])
+    return offers[:3]
+
+
 # ─── Main ──────────────────────────────────────────────────────
 
 def run_signals(resume: dict) -> list[dict]:
@@ -284,6 +297,15 @@ def run_signals(resume: dict) -> list[dict]:
         except Exception as e:
             log.warning(f"  Funding check failed: {e}")
             signals["funding"] = ""
+
+        # 7. Levels.fyi offers
+        try:
+            signals["levels_offers"] = _levels_offers(company)
+            if signals["levels_offers"]:
+                log.info(f"  📊 Levels.fyi offers: {len(signals['levels_offers'])} submissions")
+        except Exception as e:
+            log.warning(f"  Levels.fyi offers failed: {e}")
+            signals["levels_offers"] = []
 
         company_cache[company] = signals
         job["signals"] = signals
