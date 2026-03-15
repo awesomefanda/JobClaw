@@ -80,51 +80,56 @@ def _scrape_jobspy(resume: dict) -> list[dict]:
     hours_old = scout.get("hours_old", 72)
     max_results = scout.get("max_results", 50)
     is_remote = resume.get("preferences", {}).get("remote", True)
-    location = "" if is_remote else resume.get("location", "")
+    location = resume.get("location", "") if not is_remote else ""
 
     jobs = []
     for term in resume.get("target_roles", ["software engineer"]):
-        log.info(f"JobSpy: searching '{term}' on {platforms}")
-        try:
-            df = scrape_jobs(
-                site_name=platforms,
-                search_term=term,
-                location=location,
-                is_remote=is_remote,
-                results_wanted=max_results,
-                hours_old=hours_old,
-                country_indeed="USA",
-                description_format="markdown",
-            )
-        except Exception as e:
-            log.warning(f"JobSpy error for '{term}': {e}")
-            continue
+        # Always search remote jobs. Also search local on-site if remote=False.
+        searches = [("", True)]
+        if not is_remote:
+            searches.append((location, False))
+        for loc, remote_flag in searches:
+            log.info(f"JobSpy: '{term}' | remote={remote_flag} | location='{loc}' | platforms={platforms}")
+            try:
+                df = scrape_jobs(
+                    site_name=platforms,
+                    search_term=term,
+                    location=loc,
+                    is_remote=remote_flag,
+                    results_wanted=max_results,
+                    hours_old=hours_old,
+                    country_indeed="USA",
+                    description_format="markdown",
+                )
+            except Exception as e:
+                log.warning(f"JobSpy error for '{term}' (remote={remote_flag}): {e}")
+                continue
 
-        if df is None or df.empty:
-            log.debug(f"JobSpy: no results for '{term}'")
-            continue
+            if df is None or df.empty:
+                log.debug(f"JobSpy: no results for '{term}' (remote={remote_flag})")
+                continue
 
-        now = datetime.now().isoformat()
-        for _, row in df.iterrows():
-            company = str(row.get("company", "") or "").strip()
-            title = str(row.get("title", "") or "").strip()
-            city = str(row.get("city", "") or "")
-            state = str(row.get("state", "") or "")
-            loc = f"{city}, {state}".strip(", ") if city or state else ""
+            now = datetime.now().isoformat()
+            for _, row in df.iterrows():
+                company = str(row.get("company", "") or "").strip()
+                title = str(row.get("title", "") or "").strip()
+                city = str(row.get("city", "") or "")
+                state = str(row.get("state", "") or "")
+                job_loc = f"{city}, {state}".strip(", ") if city or state else ""
 
-            jobs.append({
-                "id": _id(company, title, loc),
-                "title": title, "company": company, "location": loc,
-                "is_remote": str(row.get("is_remote", False)),
-                "job_url": str(row.get("job_url", "") or ""),
-                "salary_min": _safe_float(row.get("min_amount")),
-                "salary_max": _safe_float(row.get("max_amount")),
-                "job_type": str(row.get("job_type", "") or ""),
-                "description": str(row.get("description", "") or "")[:8000],
-                "date_posted": str(row.get("date_posted", "") or ""),
-                "source": str(row.get("site", "") or "jobspy"),
-                "founder_email": "", "scraped_at": now,
-            })
+                jobs.append({
+                    "id": _id(company, title, job_loc),
+                    "title": title, "company": company, "location": job_loc,
+                    "is_remote": str(row.get("is_remote", False)),
+                    "job_url": str(row.get("job_url", "") or ""),
+                    "salary_min": _safe_float(row.get("min_amount")),
+                    "salary_max": _safe_float(row.get("max_amount")),
+                    "job_type": str(row.get("job_type", "") or ""),
+                    "description": str(row.get("description", "") or "")[:8000],
+                    "date_posted": str(row.get("date_posted", "") or ""),
+                    "source": str(row.get("site", "") or "jobspy"),
+                    "founder_email": "", "scraped_at": now,
+                })
 
     log.info(f"JobSpy: {len(jobs)} total listings")
     return jobs
