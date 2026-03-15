@@ -30,7 +30,7 @@ def _job_id(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()[:12]
 
 
-def scrape_google_jobs(search_term: str = "Staff Software Engineer", max_jobs: int = 20, delay: float = 3.0):
+def scrape_google_jobs(search_term: str = "Staff Software Engineer", max_jobs: int = 20, delay: float = 3.0, country: str = "United States"):
     """
     Scrape Google Careers for jobs.
 
@@ -38,9 +38,14 @@ def scrape_google_jobs(search_term: str = "Staff Software Engineer", max_jobs: i
         search_term: Job title to search for.
         max_jobs: Maximum number of jobs to scrape.
         delay: Delay between requests in seconds.
+        country: Country to restrict results to (e.g. "United States").
     """
+    from urllib.parse import urlencode
     base_url = "https://www.google.com/about/careers/applications/jobs/results/"
-    search_url = f"{base_url}?q={search_term.replace(' ', '+')}"
+    params = {"q": search_term}
+    if country:
+        params["location"] = country
+    search_url = f"{base_url}?{urlencode(params)}"
 
     log.info(f"Starting Google Careers scrape for '{search_term}' (max {max_jobs} jobs)")
 

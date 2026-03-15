@@ -149,12 +149,17 @@ def _scrape_google(resume: dict) -> list[dict]:
     if "google" not in scout.get("platforms", []):
         return []
 
+    # Derive country from resume location (e.g. "San Jose, CA" → "United States")
+    # Stored in preferences.country; defaults to United States
+    country = resume.get("preferences", {}).get("country", "United States")
+
     # Scrape raw HTML — one search per target role (not all joined into one broken string)
     for role in resume.get("target_roles", ["software engineer"])[:3]:
         scrape_google_jobs(
             search_term=role,
             max_jobs=scout.get("max_results", 20),
             delay=3.0,
+            country=country,
         )
 
     # Parse to structured data

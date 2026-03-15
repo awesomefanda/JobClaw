@@ -179,7 +179,7 @@ def load_resume() -> dict:
                     else:
                         platforms = ["indeed", "linkedin", "google", "glassdoor", "zip_recruiter"]
 
-                    data.setdefault("preferences", {"remote": True, "minimum_salary_usd": 200000})
+                    data.setdefault("preferences", {"remote": True, "minimum_salary_usd": 200000, "country": "United States"})
                     data.setdefault("keywords_exclude", data.get("keywords_exclude", []))
                     data.setdefault("hm_titles_above_me", [])
                     data.setdefault("blind_level_terms", [])
