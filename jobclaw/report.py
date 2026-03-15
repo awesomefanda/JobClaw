@@ -126,9 +126,13 @@ def generate_report(enriched: list[dict] | None = None) -> str:
         conns = ej.get("my_connections", [])
         conn_text = "\n".join(f"{c['name']} ({c['position']})" for c in conns[:3]) or "—"
 
-        # Hiring posts
+        # Hiring posts + hiring profiles (LinkedIn /in with Hiring badge)
         hp = signals.get("hiring_posts", [])
-        hp_text = "\n\n".join(f"{p.get('poster','?')}: {p.get('snippet','')[:120]}\n{p.get('url','')}" for p in hp[:2]) or "—"
+        hprof = signals.get("hiring_profiles", [])
+        hp_parts = [f"{p.get('poster','?')}: {p.get('snippet','')[:120]}\n{p.get('url','')}" for p in hp[:2]]
+        for prof in hprof[:2]:
+            hp_parts.append(f"🔵 {prof.get('person','?')} [Hiring badge]: {prof.get('snippet','')[:100]}\n{prof.get('url','')}")
+        hp_text = "\n\n".join(hp_parts) or "—"
 
         # Blind offers
         blind = signals.get("blind_offers", [])
@@ -151,14 +155,22 @@ def generate_report(enriched: list[dict] | None = None) -> str:
                 health_parts.append(f"⚠️ {n[:80]}")
         health_text = "\n".join(health_parts)
 
-        # Salary
+        # Salary — levels.fyi range, then job listing range, then offer submission hint
         sal_text = salary.get("tc_range", "") or salary.get("base_range", "")
         if not sal_text:
             sm, sx = ej.get("salary_min", ""), ej.get("salary_max", "")
             if sm and sx:
                 sal_text = f"${sm} - ${sx}"
-            else:
-                sal_text = "—"
+        if not sal_text:
+            raw_offers = signals.get("levels_offers", [])
+            for o in raw_offers:
+                tc = o.get("tc_range", "") if isinstance(o, dict) else ""
+                if tc:
+                    sal_text = tc
+                    break
+        if not sal_text:
+            n = len(signals.get("levels_offers", []))
+            sal_text = f"📊 {n} recent submissions" if n else "—"
 
         # Best contact
         bc = ej.get("best_contact", {})
@@ -209,15 +221,26 @@ def generate_report(enriched: list[dict] | None = None) -> str:
 
     # ── Sheet 2: Hiring Posts ──────────────────────────────────
     ws2 = wb.create_sheet("Hiring Posts")
-    _header_row(ws2, ["Poster", "Company", "Snippet", "URL"], [20, 14, 55, 35])
+    _header_row(ws2, ["Person / Poster", "Type", "Company", "Snippet", "URL"], [22, 12, 14, 55, 35])
     row = 2
     seen_urls = set()
     for ej in enriched:
-        for p in ej.get("signals", {}).get("hiring_posts", []):
+        sig2 = ej.get("signals", {})
+        # Text posts (site:linkedin.com/posts)
+        for p in sig2.get("hiring_posts", []):
             if p.get("url") in seen_urls:
                 continue
             seen_urls.add(p.get("url"))
-            for col, val in enumerate([p.get("poster",""), ej.get("company",""), p.get("snippet",""), p.get("url","")], 1):
+            for col, val in enumerate([p.get("poster",""), "Post", ej.get("company",""), p.get("snippet",""), p.get("url","")], 1):
+                _cell(ws2, row, col, val)
+            ws2.row_dimensions[row].height = 50
+            row += 1
+        # Profiles with Hiring badge (site:linkedin.com/in)
+        for prof in sig2.get("hiring_profiles", []):
+            if prof.get("url") in seen_urls:
+                continue
+            seen_urls.add(prof.get("url"))
+            for col, val in enumerate([prof.get("person",""), "🔵 Hiring Profile", ej.get("company",""), prof.get("snippet",""), prof.get("url","")], 1):
                 _cell(ws2, row, col, val)
             ws2.row_dimensions[row].height = 50
             row += 1
@@ -225,7 +248,9 @@ def generate_report(enriched: list[dict] | None = None) -> str:
 
     # ── Sheet 3: Salary Data ───────────────────────────────────
     ws3 = wb.create_sheet("Salary Data")
-    _header_row(ws3, ["Company", "TC Range", "Base Range", "Blind Offers", "Funding"], [14, 18, 18, 45, 40])
+    _header_row(ws3,
+        ["Company", "TC Range\n(Levels.fyi)", "Base Range\n(Levels.fyi)", "Recent Submissions\n(= actively interviewing)", "Blind Offers", "Funding"],
+        [14, 18, 18, 50, 45, 40])
     seen_co: set[str] = set()
     row = 2
     for ej in enriched:
@@ -236,10 +261,33 @@ def generate_report(enriched: list[dict] | None = None) -> str:
         seen_co.add(co.lower())
         sig = ej.get("signals", {})
         sal = sig.get("salary", {})
+
+        # levels_offers — list of {snippet, tc_range} dicts (new format) or legacy strings
+        raw_offers = sig.get("levels_offers", [])
+        offer_lines = []
+        for o in raw_offers[:3]:
+            if isinstance(o, dict):
+                line = o.get("snippet", "")[:150]
+                tc = o.get("tc_range", "")
+                if tc:
+                    line = f"💰 {tc} — {line}"
+            else:
+                line = str(o)[:150]
+            if line:
+                offer_lines.append(line)
+        submissions_text = "\n\n".join(offer_lines) if offer_lines else "—"
+
         blind = "\n".join(sig.get("blind_offers", [])[:2]) or "—"
-        for col, val in enumerate([co, sal.get("tc_range","—"), sal.get("base_range","—"), blind, sig.get("funding","—")], 1):
+        for col, val in enumerate([
+            co,
+            sal.get("tc_range", "") or "—",
+            sal.get("base_range", "") or "—",
+            submissions_text,
+            blind,
+            sig.get("funding", "") or "—",
+        ], 1):
             _cell(ws3, row, col, val)
-        ws3.row_dimensions[row].height = 50
+        ws3.row_dimensions[row].height = 70
         row += 1
     ws3.freeze_panes = 'A2'
 
@@ -252,6 +300,82 @@ def generate_report(enriched: list[dict] | None = None) -> str:
         for col, val in enumerate([idx+1, ej.get("company",""), ej.get("title",""), ej.get("track",""), ej.get("action_score",0), "New", "","","","","",""], 1):
             _cell(ws4, row, col, val)
     ws4.freeze_panes = 'C2'
+
+    # ── Sheet 5: Alerts ────────────────────────────────────────
+    ws5 = wb.create_sheet("🔔 Alerts")
+    _header_row(ws5,
+        ["#", "Company", "Title", "Alert Signals", "Action\nScore", "Fit\nScore", "Track", "Best Contact", "Apply URL"],
+        [5, 14, 28, 36, 8, 8, 6, 28, 35])
+
+    ALERT_FILL = PatternFill('solid', fgColor='FFF9C4')  # light yellow
+    HOT_FILL   = PatternFill('solid', fgColor='FFCDD2')  # light red
+
+    alerts = []
+    for job in enriched:
+        signals = job.get("signals", {})
+        reasons = []
+
+        if job.get("action_score", 0) >= 1.2:
+            reasons.append("🔥 Top Pick")
+        if job.get("fit_score", 0) >= 0.85:
+            reasons.append("🎯 Strong Fit")
+        if signals.get("hiring_posts") or signals.get("hiring_profiles"):
+            reasons.append("📢 Active Hiring")
+        if signals.get("funding"):
+            reasons.append("💰 Recently Funded")
+        if job.get("track") == "A":
+            reasons.append("⭐ Warm Path")
+
+        date_str = job.get("date_posted", "")
+        if date_str:
+            try:
+                posted = datetime.strptime(str(date_str)[:10], "%Y-%m-%d")
+                if (datetime.now() - posted).days <= 7:
+                    reasons.append("📅 Fresh (<7 days)")
+            except Exception:
+                pass
+
+        if job.get("action_score", 0) >= 1.0 or len(reasons) >= 2:
+            alerts.append((job, reasons))
+
+    alerts.sort(key=lambda x: x[0].get("action_score", 0), reverse=True)
+
+    for idx, (job, reasons) in enumerate(alerts):
+        row = idx + 2
+        fill = HOT_FILL if job.get("action_score", 0) >= 1.2 else ALERT_FILL
+
+        bc = job.get("best_contact", {})
+        bc_parts = []
+        if bc.get("name"):
+            bc_parts.append(f"{bc['name']} ({bc.get('title', '')})")
+        if bc.get("source") == "your_connection":
+            bc_parts.append("⭐ YOUR CONNECTION")
+        elif bc.get("source") == "founder_direct":
+            bc_parts.append("🎯 DIRECT EMAIL")
+        bc_text = "\n".join(bc_parts) or "—"
+
+        values = [
+            idx + 1,
+            job.get("company", ""),
+            job.get("title", ""),
+            "\n".join(reasons),
+            job.get("action_score", 0),
+            job.get("fit_score", 0),
+            f"Track {job.get('track', 'B')}",
+            bc_text,
+            job.get("job_url", ""),
+        ]
+        for col, val in enumerate(values, 1):
+            font = BOLD if col in (2, 3) else BODY
+            if col == 5:
+                font = HI_FONT if job.get("action_score", 0) >= 1.0 else MID_FONT
+            elif col == 6:
+                font = HI_FONT if job.get("fit_score", 0) >= 0.85 else MID_FONT
+            _cell(ws5, row, col, val, font=font, fill=fill)
+        ws5.row_dimensions[row].height = 70
+
+    ws5.freeze_panes = 'C2'
+    log.info(f"   Alerts: {len(alerts)} jobs flagged")
 
     # ── Save ───────────────────────────────────────────────────
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -8,6 +8,7 @@ Sources:
   4. Y Combinator "Work at a Startup" (workatastartup.com)
   5. Hacker News "Who's Hiring" monthly thread
   6. Wellfound (AngelList) role pages
+  11. TeamBlind Job Board (encrypted REST API)
 
 Each source is wrapped in try/except — if one fails we log and continue.
 Output: data/jobs.csv (cumulative, deduped)
@@ -950,131 +951,402 @@ def _get_level_equivalencies(resume: dict) -> list[str]:
     return list(expanded_roles)
 
 
+def _levels_decrypt(payload_b64: str) -> dict:
+    """Decrypt levels.fyi API response (AES-ECB + zlib)."""
+    import base64
+    import hashlib
+    import zlib
+    try:
+        from Cryptodome.Cipher import AES
+    except ImportError:
+        from Crypto.Cipher import AES
+    key = base64.b64encode(hashlib.md5(b"levelstothemoon!!").digest()).decode("ascii")[:16].encode()
+    ct = base64.b64decode(payload_b64)
+    decrypted = AES.new(key, AES.MODE_ECB).decrypt(ct)
+    return json.loads(zlib.decompress(decrypted).decode("utf-8"))
+
+
+_LEVELS_API = "https://api.levels.fyi/v1/job/search"
+_LEVELS_SESSION = requests.Session()
+_LEVELS_SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, */*",
+    "Referer": "https://www.levels.fyi/",
+    "Origin": "https://www.levels.fyi",
+})
+
+
+def _levels_api_search(search_text: str, location_slug: str = "united-states",
+                        work_arrangements: list | None = None, offset: int = 0,
+                        limit: int = 25, posted_days: int = 30) -> tuple[list, int]:
+    """Call levels.fyi REST API. Returns (companies_list, total_matching_jobs)."""
+    params: list[tuple[str, str]] = [
+        ("searchText", search_text),
+        ("locationSlugs[]", location_slug),
+        ("limit", str(limit)),
+        ("offset", str(offset)),
+        ("sortBy", "date_published"),
+        ("postedAfterValue", str(posted_days)),
+        ("postedAfterTimeType", "days"),
+    ]
+    for wa in (work_arrangements or ["remote", "hybrid"]):
+        params.append(("workArrangements[]", wa))
+
+    try:
+        resp = _LEVELS_SESSION.get(_LEVELS_API, params=params, timeout=15)
+        if resp.status_code != 200:
+            log.debug(f"levels.fyi API returned {resp.status_code}")
+            return [], 0
+        data = resp.json()
+        payload = data.get("payload", "")
+        if not payload:
+            return [], 0
+        decoded = _levels_decrypt(payload)
+        results = decoded.get("results", [])
+        total = decoded.get("totalMatchingJobs", 0)
+        return results, total
+    except Exception as e:
+        log.debug(f"levels.fyi API error: {e}")
+        return [], 0
+
+
 def _scrape_levels_jobs(resume: dict) -> list[dict]:
-    """Scrape Levels.fyi jobs page for relevant positions.
-    
-    Levels.fyi has job listings with salary data and level information.
-    We search for jobs that match the user's target roles and level.
+    """Fetch jobs from levels.fyi REST API (api.levels.fyi/v1/job/search).
+
+    Uses proper AES-ECB decryption of the API response.
+    Returns salary data (minBaseSalary/maxBaseSalary) directly with each job.
+    Paginates across up to 4 pages (100 companies, ~300 jobs max).
     """
-    jobs = []
     now = datetime.now().isoformat()
-    
     target_roles = resume.get("target_roles", [])
-    blind_level_terms = resume.get("blind_level_terms", [])
-    location = resume.get("location", "san-francisco-bay-area")  # Default to SF
-    
-    # Get expanded roles including level equivalencies
-    expanded_roles = _get_level_equivalencies(resume)
-    
-    # Convert location to levels.fyi slug
-    location_slug = location.lower().replace(" ", "-").replace(",", "")
+    prefs = resume.get("preferences", {})
+    is_remote = prefs.get("remote", True)
+    country = prefs.get("country", "United States")
+    hours_old = resume.get("scout", {}).get("hours_old", 168)
+    posted_days = max(1, hours_old // 24)
+
+    # Location slug
+    location = resume.get("location", "")
     if "san francisco" in location.lower() or "bay area" in location.lower():
         location_slug = "san-francisco-bay-area"
     elif "new york" in location.lower():
         location_slug = "new-york-city"
     elif "seattle" in location.lower():
         location_slug = "seattle"
+    elif "united states" in country.lower() or "usa" in country.lower():
+        location_slug = "united-states"
     else:
-        location_slug = "united-states"  # fallback
-    
-    # Build search queries for levels.fyi jobs
-    queries = []
-    for role in expanded_roles[:2]:  # Limit to 2 roles to speed up
-        # Search for role in specific location with job-specific terms
-        queries.append(f'site:levels.fyi/jobs "{role}" "{location_slug}" apply')
-        queries.append(f'"{role}" site:levels.fyi/jobs "{location_slug}"')
-    
-    log.info(f"Levels.fyi jobs: searching {len(queries)} queries")
-    
-    seen_urls = set()
-    for q in queries:
-        try:
-            results = _search(q, num=5)  # Reduced from 8 to 5
-            log.debug(f"Levels.fyi query '{q}' returned {len(results)} results")
-            for r in results:
-                url = r.get("url", "")
-                if url in seen_urls or "levels.fyi" not in url:
+        location_slug = "united-states"
+
+    work_arrangements = ["remote"] if is_remote else ["remote", "hybrid", "office"]
+
+    jobs: list[dict] = []
+    seen_ids: set[str] = set()
+
+    search_terms = target_roles[:3]  # top 3 roles
+    if not search_terms:
+        search_terms = ["Software Engineer"]
+
+    for term in search_terms:
+        log.info(f"Levels.fyi API: '{term}' in {location_slug} (last {posted_days}d)")
+        for page in range(4):  # up to 4 pages = 100 companies
+            offset = page * 25
+            results, total = _levels_api_search(
+                search_text=term,
+                location_slug=location_slug,
+                work_arrangements=work_arrangements,
+                offset=offset,
+                posted_days=posted_days,
+            )
+            if not results:
+                break
+            if page == 0:
+                log.info(f"  Total matching: {total}")
+
+            for company_group in results:
+                company = company_group.get("companyName", "")
+                for j in company_group.get("jobs", []):
+                    job_id = str(j.get("id", ""))
+                    if job_id in seen_ids:
+                        continue
+                    seen_ids.add(job_id)
+
+                    title = j.get("title", "")
+                    locs = j.get("locations", [])
+                    loc_str = locs[0] if locs else location_slug.replace("-", " ").title()
+                    arrangement = j.get("workArrangement", "")
+                    min_base = j.get("minBaseSalary") or ""
+                    max_base = j.get("maxBaseSalary") or ""
+                    apply_url = j.get("applicationUrl", f"https://www.levels.fyi/jobs?searchText={term}")
+                    posted = j.get("postingDate", "")[:10] if j.get("postingDate") else ""
+
+                    jobs.append({
+                        "id": _id(company, title, job_id),
+                        "title": title,
+                        "company": company,
+                        "location": loc_str,
+                        "is_remote": "true" if arrangement == "remote" else "false",
+                        "job_url": apply_url,
+                        "salary_min": str(min_base),
+                        "salary_max": str(max_base),
+                        "job_type": "fulltime",
+                        "description": f"Levels.fyi: {title} at {company}. Salary: ${min_base}–${max_base}",
+                        "date_posted": posted,
+                        "source": "levels_fyi_jobs",
+                        "founder_email": "",
+                        "scraped_at": now,
+                    })
+
+            if offset + 25 >= min(total, 100):
+                break  # don't over-paginate
+
+    log.info(f"Levels.fyi API: {len(jobs)} jobs from {len(search_terms)} search terms")
+    return jobs
+
+
+# ─── Source 11: TeamBlind Job Board ───────────────────────────
+#
+# PROTOCOL (reverse-engineered from /_next/static/chunks/bb905db63220295b.js
+# and /_next/static/chunks/9679ba756ef6a504.js):
+#
+# The site uses a custom "encryptedClientFetch" pattern:
+#   1. Generate a random 256-bit hex string as the session AES key.
+#   2. AES-encrypt the JSON request body (always "{}") using sjcl (CCM mode,
+#      PBKDF2 key derivation, 10 000 iterations, 128-bit AES).  The output is
+#      a JSON string like {"iv":...,"v":1,"iter":10000,"ks":128,"ts":64,
+#      "mode":"ccm","adata":"","cipher":"aes","salt":...,"ct":...}.
+#   3. RSA-encrypt the raw hex key with the site's PKCS#1 (1024-bit) public key.
+#   4. POST {"payload": <sjcl_output>, "encClientKey": <rsa_b64>} to the API.
+#   5. Response is the JSON string of the sjcl cipher; decrypt with the same key.
+#
+# All filter parameters travel as URL query-string parameters (not body).
+# The body is always the encrypted empty object "{}".
+#
+# Discovered endpoints (all accept POST via encryptedClientFetch):
+#   GET-style: POST /api/jobs?[params]
+#     searchKeyword    string        free-text search
+#     page             int           0-based page number (50 jobs/page)
+#     offset           int           absolute offset (page * 50)
+#     remoteOnly       bool          true/false
+#     datePosted       int           days: -1=any, 1, 7, 14, 30
+#     yearsOfExperience string       "min-max" e.g. "3-7"
+#     salary           string        "min-max" e.g. "150000-300000"
+#     locations        str (pipe-sep) location IDs e.g. "M807" or "M807|M819"
+#     companies        str (pipe-sep) company IDs e.g. "100006"
+#     companySizes     str (pipe-sep) e.g. "5,000+ employees"
+#     skills           str (pipe-sep) skill IDs e.g. "546" (Python)
+#
+#   Response JSON fields: feeds (list), total (int), hasMore (bool),
+#                         currentOffset (int), maxId (int)
+#   Each feed item: type, title, companyName, companyId, location, highlights
+#                   (includes salary range), id (job ID), isBookmarked,
+#                   isPromoted, companyLogo, metadata
+#
+#   POST /api/jobs/suggestions/search-bar?keyword=<str>  -> [{id, name, type}]
+#   POST /api/jobs/suggestions/location?keyword=<str>    -> [{id, name}]
+#   POST /api/jobs/suggestions/company?keyword=<str>     -> [{id, name}]
+#   POST /api/jobs/suggestions/skill?keyword=<str>       -> [{id, name}]
+#   POST /api/jobs/bookmarks?page=<int>                  -> same as /api/jobs (auth req)
+#
+# RSA public key (PKCS#1, 1024-bit, PKCS1v15 padding):
+_BLIND_RSA_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
+MIIBITANBgkqhkiG9w0BAQEFAAOCAQ4AMIIBCQKCAQBOBw7Q2T0Wmb/qNPuNbk+f
+ZWRbKgBwikJa2vJ5Ht+quwhLbvpUVOKwlNM93huIzkM5wWTRoVpLmczfCt3CyxBd
+eU5PxY8JhXxHch/h41e/AgKXrOPFDJuH5T2V++Zw21ArC6rk3YFScNH9xOa0YXfY
+x2RQxLM7hD7Bzy5mtxN5nqULxDhYWTeZT6aQw9Wii/0HBoePqgW77TpXcgQxJ5AP
+bQQ7QlGdAFMWgjhFWret7cffGrd2lFn5RCgMU316UKf2CTkB4orcsiqCYJ76+LZJ
+jLT7kk0ZWYk8Xnn7uwpiCMVipOmZS7cmX3MWiRhbQqkw1UGi2SWn2Ov7plwgx9CB
+AgMBAAE=
+-----END PUBLIC KEY-----"""
+
+_BLIND_JOBS_PER_PAGE = 50
+
+
+_SJCL_L = 2                     # sjcl default L value
+_SJCL_NONCE_LEN = 15 - _SJCL_L  # 13 bytes nonce for AES-CCM
+
+_blind_pub_key = None  # cached RSA key object
+
+
+def _sjcl_b64e(b: bytes) -> str:
+    return __import__("base64").b64encode(b).decode().rstrip("=")
+
+
+def _sjcl_b64d(s: str) -> bytes:
+    return __import__("base64").b64decode(s + "=" * ((-len(s)) % 4))
+
+
+def _sjcl_encrypt(hex_key: str, plaintext: str) -> str:
+    """Replicate sjcl.encrypt(hexKey, plaintext) — AES-CCM + PBKDF2-SHA256."""
+    import os
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESCCM
+    salt = os.urandom(8)
+    iv   = os.urandom(_SJCL_NONCE_LEN)
+    kdf  = PBKDF2HMAC(algorithm=hashes.SHA256(), length=16, salt=salt, iterations=10000)
+    ct   = AESCCM(kdf.derive(hex_key.encode()), tag_length=8).encrypt(iv, plaintext.encode(), b"")
+    return json.dumps({"iv": _sjcl_b64e(iv), "v": 1, "iter": 10000, "ks": 128, "ts": 64,
+                       "mode": "ccm", "adata": "", "cipher": "aes",
+                       "salt": _sjcl_b64e(salt), "ct": _sjcl_b64e(ct)}, separators=(",", ":"))
+
+
+def _sjcl_decrypt(hex_key: str, sjcl_json_str: str) -> str:
+    """Replicate sjcl.decrypt(hexKey, cipherObj) — AES-CCM + PBKDF2-SHA256."""
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESCCM
+    d    = json.loads(sjcl_json_str)
+    salt = _sjcl_b64d(d["salt"])
+    iv   = _sjcl_b64d(d["iv"])[:_SJCL_NONCE_LEN]  # sjcl stores 16 bytes, uses first 13
+    ct   = _sjcl_b64d(d["ct"])
+    kdf  = PBKDF2HMAC(algorithm=hashes.SHA256(), length=d.get("ks", 128) // 8,
+                      salt=salt, iterations=d.get("iter", 10000))
+    return AESCCM(kdf.derive(hex_key.encode()), tag_length=d.get("ts", 64) // 8).decrypt(iv, ct, b"").decode()
+
+
+def _blind_encrypted_fetch(path: str) -> dict | list | None:
+    """POST to teamblind.com using the encryptedClientFetch protocol (pure Python).
+
+    Protocol (reverse-engineered):
+      1. Generate random 256-bit hex string as session key.
+      2. sjcl.encrypt(hexKey, '{}')  →  AES-CCM/PBKDF2 JSON blob.
+      3. RSA-PKCS1v15 encrypt hexKey with site's 1024-bit public key.
+      4. POST {payload, encClientKey} — query params carry the real filters.
+      5. Decrypt response: json.loads(sjcl.decrypt(hexKey, json.loads(body))).
+    """
+    import os, base64
+    global _blind_pub_key
+
+    try:
+        from cryptography.hazmat.primitives.asymmetric import padding as rsa_padding
+        from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+        if _blind_pub_key is None:
+            _blind_pub_key = load_pem_public_key(_BLIND_RSA_PUBLIC_KEY.strip().encode())
+
+        hex_key        = os.urandom(32).hex()
+        encrypted_body = _sjcl_encrypt(hex_key, "{}")
+        enc_client_key = base64.b64encode(
+            _blind_pub_key.encrypt(hex_key.encode(), rsa_padding.PKCS1v15())
+        ).decode()
+
+        resp = requests.post(
+            f"https://www.teamblind.com{path}",
+            data=json.dumps({"payload": encrypted_body, "encClientKey": enc_client_key}),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, */*",
+                "Origin": "https://www.teamblind.com",
+                "Referer": "https://www.teamblind.com/jobs",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            },
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            log.debug(f"Blind API {path} → HTTP {resp.status_code}")
+            return None
+
+        inner = json.loads(resp.text)   # outer JSON string wrapping the sjcl cipher JSON
+        return json.loads(_sjcl_decrypt(hex_key, inner))
+
+    except Exception as e:
+        log.debug(f"Blind encrypted fetch failed for {path}: {e}")
+        return None
+
+
+def _scrape_teamblind_jobs(resume: dict) -> list[dict]:
+    """Fetch job listings from TeamBlind Job Board via the encrypted REST API.
+
+    TeamBlind's /api/jobs endpoint uses a custom encryption layer (sjcl AES-CCM
+    + RSA-PKCS1v15) for all requests.  See the protocol comment above for details.
+    Returns up to 200 listings (4 pages) matching the resume's target roles.
+
+    Requires Node.js with /tmp/node_modules/sjcl and /tmp/node_modules/node-rsa.
+    Install once with: npm install --prefix /tmp sjcl node-rsa
+    """
+    now = datetime.now().isoformat()
+    target_roles = resume.get("target_roles", [])
+    prefs = resume.get("preferences", {})
+    is_remote = prefs.get("remote", True)
+    scout_cfg = resume.get("scout", {})
+    max_results = scout_cfg.get("max_results", 50)
+
+    jobs: list[dict] = []
+    seen_ids: set[str] = set()
+
+    # Build search terms: use first 3 target roles + "software engineer" catch-all
+    search_terms = list(dict.fromkeys(target_roles[:3] + ["software engineer"]))
+
+    for term in search_terms:
+        pages_to_fetch = min(4, (max_results + _BLIND_JOBS_PER_PAGE - 1) // _BLIND_JOBS_PER_PAGE)
+        for page in range(pages_to_fetch):
+            offset = page * _BLIND_JOBS_PER_PAGE
+            params = f"searchKeyword={requests.utils.quote(term)}&page={page}&offset={offset}"
+            if is_remote:
+                params += "&remoteOnly=true"
+
+            data = _blind_encrypted_fetch(f"/api/jobs?{params}")
+            if data is None or "feeds" not in data:
+                log.debug(f"TeamBlind: no data for '{term}' page {page}")
+                break
+
+            feeds: list[dict] = data.get("feeds", [])
+            for item in feeds:
+                job_id = str(item.get("id", ""))
+                if not job_id or job_id in seen_ids:
                     continue
-                seen_urls.add(url)
-                
-                title = r.get("title", "")
-                snippet = r.get("snippet", "")
-                log.debug(f"Found levels.fyi job: {title}")
-                
-                # Extract company and role from title
-                # Formats: "Software Engineer at Google - Levels.fyi"
-                #          "Software Engineer, Android | Adobe | Levels.fyi" 
-                #          "Staff Software Engineer, Activation Platform | Block"
-                title_clean = title.replace(" - Levels.fyi", "").replace(" | Levels.fyi", "").strip()
-                
-                log.debug(f"Processing title: '{title}' -> cleaned: '{title_clean}'")
-                
-                role_part = ""
-                company_part = ""
-                
-                if " at " in title_clean:
-                    # Format: "Software Engineer at Google"
-                    parts = title_clean.split(" at ", 1)
-                    role_part = parts[0].strip()
-                    company_part = parts[1].strip()
-                elif " | " in title_clean:
-                    # Format: "Software Engineer | Company" or "Role | Company | Location"
-                    parts = title_clean.split(" | ")
-                    if len(parts) >= 2:
-                        role_part = parts[0].strip()
-                        company_part = parts[1].strip()
-                elif " - " in title_clean and len(title_clean.split(" - ")) == 2:
-                    # Format: "Role - Company"
-                    parts = title_clean.split(" - ", 1)
-                    role_part = parts[0].strip()
-                    company_part = parts[1].strip()
-                
-                if not role_part or not company_part:
-                    log.debug(f"Could not parse title: '{title_clean}' - no role/company found")
-                    continue
-                    
-                log.debug(f"Parsed: role='{role_part}', company='{company_part}'")
-                
-                # Skip if doesn't match our target roles (be more lenient with expanded roles)
-                role_match = any(tr.lower() in role_part.lower() for tr in target_roles)
-                if not role_match:
-                    # Also check expanded roles
-                    role_match = any(er.lower() in role_part.lower() for er in expanded_roles)
-                
-                if not role_match:
-                    log.debug(f"Role '{role_part}' doesn't match target roles {target_roles} or expanded {expanded_roles}")
-                    continue
-                
-                log.info(f"Found levels.fyi job: {role_part} at {company_part}")
-                
+                seen_ids.add(job_id)
+
+                title = item.get("title", "").strip()
+                company = item.get("companyName", "").strip()
+                location = item.get("location", "").strip()
+                highlights = item.get("highlights", [])
+
+                # Parse salary range from highlights (e.g. "$176K-$264K")
+                salary_min = salary_max = ""
+                for h in highlights:
+                    if h.startswith("$") and "-" in h:
+                        parts = h.replace("$", "").replace("K", "000").split("-")
+                        try:
+                            salary_min = str(int(float(parts[0].replace(",", ""))))
+                            salary_max = str(int(float(parts[1].replace(",", ""))))
+                        except (ValueError, IndexError):
+                            pass
+                        break
+
+                skills_str = ", ".join(h for h in highlights if not h.startswith("$") and h != "Remote")
+
+                is_remote_job = (
+                    "remote" in location.lower()
+                    or any(h.lower() == "remote" for h in highlights)
+                )
+
                 jobs.append({
-                    "id": _id(company_part, role_part, location_slug),
-                    "title": role_part,
-                    "company": company_part,
-                    "location": location_slug.replace("-", " ").title(),
-                    "is_remote": "false",  # levels.fyi focuses on specific locations
-                    "job_url": url,
-                    "salary_min": "", "salary_max": "", "job_type": "",
-                    "description": f"Levels.fyi job listing: {snippet}",
+                    "id": _id(company, title, location) if not job_id else f"tblind_{job_id}",
+                    "title": title,
+                    "company": company,
+                    "location": location,
+                    "is_remote": str(is_remote_job),
+                    "job_url": f"https://www.teamblind.com/jobs/{job_id}",
+                    "salary_min": salary_min,
+                    "salary_max": salary_max,
+                    "job_type": "",
+                    "description": f"Skills/highlights: {skills_str}" if skills_str else "",
                     "date_posted": "",
-                    "source": "levels_fyi_jobs",
+                    "source": "teamblind",
                     "founder_email": "",
                     "scraped_at": now,
                 })
-                
-                log.debug(f"Jobs list now has {len(jobs)} items")
-            
-            time.sleep(1)
-        except Exception as e:
-            log.debug(f"Levels.fyi query failed: {e}")
-            continue
-    
-    if jobs:
-        log.info(f"Levels.fyi jobs: {len(jobs)} listings")
-    else:
-        log.debug("Levels.fyi jobs: no listings found")
-    
-    log.debug(f"Returning {len(jobs)} levels.fyi jobs")
+
+            has_more = data.get("hasMore", False)
+            if not has_more or len(jobs) >= max_results:
+                break
+
+        if len(jobs) >= max_results:
+            break
+
+    log.info(f"TeamBlind: {len(jobs)} job listings")
     return jobs
 
 
@@ -1105,6 +1377,7 @@ def run_scout(resume: dict) -> int:
         "blind_feed":      lambda: _scrape_blind_offers(resume),
         "rss_feeds":       lambda: _scrape_rss_feeds(resume),
         "levels_fyi":      lambda: _scrape_levels_jobs(resume),
+        "teamblind":       lambda: _scrape_teamblind_jobs(resume),
     }
 
     all_jobs: list[dict] = []

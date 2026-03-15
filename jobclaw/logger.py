@@ -12,9 +12,10 @@ import logging
 from pathlib import Path
 from datetime import datetime
 
-_LOG_DIR = Path(__file__).resolve().parent.parent / "data"
+_LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 _LOG_DIR.mkdir(exist_ok=True)
-_LOG_FILE = _LOG_DIR / "jobclaw.log"
+_RUN_TS = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+_LOG_FILE = _LOG_DIR / f"jobclaw_{_RUN_TS}.log"
 
 _LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 

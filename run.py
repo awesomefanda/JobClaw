@@ -52,7 +52,7 @@ def main():
     if result:
         print(f"\n  Open the report: {result}\n")
     else:
-        print("\n  Pipeline completed with errors. Check data/jobclaw.log\n")
+        print("\n  Pipeline completed with errors. Check logs/ for details.\n")
 
 
 if __name__ == "__main__":

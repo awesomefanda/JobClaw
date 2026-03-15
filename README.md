@@ -7,7 +7,9 @@ Drop your resume. Get an Excel report with ranked leads, contacts, salary data, 
 ```bash
 pip install -r requirements.txt
 playwright install chromium      # for Google Careers scraping
-cp .env.example .env             # add GROQ_API_KEY (free at console.groq.com)
+cp .env.example .env
+# Recommended: add GEMINI_API_KEY (free at aistudio.google.com) — primary scorer
+# Required fallback: add GROQ_API_KEY (free at console.groq.com)
 cp ~/Downloads/resume.pdf .local/   # personal files live in .local/ (gitignored)
 python run.py                    # → open data/reports/*.xlsx
 ```
@@ -18,7 +20,7 @@ No JSON to edit. No forms. JobClaw reads your resume, infers your level, what ti
 
 ## The Algorithm
 
-### Phase 0: BOOTSTRAP (automatic, one Groq call)
+### Phase 0: BOOTSTRAP (automatic, one LLM call)
 
 ```
 User drops: resume.pdf
@@ -37,14 +39,12 @@ Cached at data/parsed_resume.json — edit if you want, but you don't have to.
 
 ### Phase 1: DISCOVER (10 sources, zero AI cost, fully parallel)
 
-Inspired by Andrej Karpathy's job scraping methodology: resilient Playwright-based scraping with local HTML caching for offline iteration and LLM analysis.
-
 All 10 sources run concurrently (5 workers). Total scout time ~same as the slowest single source.
 
 | # | Source | Method | What It Finds |
 |---|--------|--------|---------------|
 | 1 | **JobSpy** | Indeed, LinkedIn, Glassdoor, ZipRecruiter | Broadest coverage — 100 results per platform per term |
-| 1b | **Google Careers** | Playwright scraper (Karpathy-inspired) | Direct from careers.google.com — resilient to bot detection |
+| 1b | **Google Careers** | Playwright scraper | Direct from careers.google.com — resilient to bot detection |
 | 2 | **Greenhouse** | Public JSON API (`boards-api.greenhouse.io`) | Direct career pages, no rate limit |
 | 3 | **Lever** | Public JSON API (`api.lever.co`) | Same — fast, direct |
 | 4 | **YC Work at a Startup** | Google fallback | YC-backed startups, founders reachable |
@@ -60,14 +60,21 @@ All 10 sources run concurrently (5 workers). Total scout time ~same as the slowe
 
 **Source 9 is special:** Levels.fyi listings are tagged by level (E5, L6, Staff, etc.) and come with real compensation data — base, equity, bonus — scraped from the same page as the job.
 
-### Phase 2: SCORE (Groq — only AI cost)
+### Phase 2: SCORE (LLM scoring — Gemini first, Groq fallback)
 
 ```
 For each unscored job in CSV:
   • Quick keyword exclude filter (zero cost)
-  • Groq scores JD vs resume → fit_score + outreach draft
+  • LLM scores JD vs resume → fit_score + outreach draft
   • Keep only matches ≥ 0.75
   • Track scored IDs to never re-score
+
+Model fallback chain (automatic, if GEMINI_API_KEY is set):
+  1. Gemini 2.0 Flash               (1500 req/day, 1M tokens/min — recommended first)
+  2. Groq llama-3.3-70b-versatile  (100k tokens/day)
+  3. Groq llama-3.1-8b-instant      (500k tokens/day)
+
+Without GEMINI_API_KEY: starts at step 2.
 ```
 
 ### Phase 3a: SIGNALS (web intelligence, zero cost)
@@ -83,9 +90,9 @@ Step B — per-company enrichment (3 parallel workers):
   • Blind offer data        pool lookup (instant, no extra search)
   • Blind sentiment / PIP   2 targeted searches
   • Layoff check            pool lookup (instant)
-  • Levels.fyi salary       direct HTTP endpoint
+  • Levels.fyi salary       structured endpoint + DDG search fallback
+  • Levels.fyi offers       recent offer submissions (proxy for active interviewing)
   • Funding signals         1 targeted search
-  • Levels.fyi offers       1 targeted search
 
 Results cached in signals_cache.json — re-runs skip already-enriched companies.
 ~5-6 min for 85 companies (vs ~30 min sequential).
@@ -132,7 +139,11 @@ Track B (cold): no warm path — tailored resume required
 
 ### Phase 5: EXCEL REPORT
 
-4 sheets: **Job Matches** (ranked) · **Hiring Posts** · **Salary Data** · **Pipeline Tracker**
+5 sheets: **Job Matches** (ranked) · **Hiring Posts** · **Salary Data** · **Pipeline Tracker** · **🔔 Alerts**
+
+The **Alerts** tab surfaces only the jobs worth acting on immediately — high action score, active hiring signal, recent funding, or a warm connection — sorted by urgency.
+
+**Salary Data tab** shows per company: TC range, base range (from levels.fyi structured endpoint + search fallback), **Recent Submissions** (people who recently submitted offers to levels.fyi — proof the company is actively closing candidates), Blind offers, and funding news.
 
 ---
 
@@ -169,7 +180,7 @@ Your title at one company rarely maps 1:1 to another. JobClaw uses Levels.fyi's 
 | Senior Engineer II | Microsoft | E5, L5, Senior2 |
 | Staff Engineer | Meta | E6, Staff |
 
-Groq infers your `blind_level_terms` from your resume on first run. You can review and edit them in `data/parsed_resume.json → blind_level_terms`. The more accurate these are, the better the Blind offer signal ("PMTS vs E6 vs L7 offer comparison" confirms Oracle, Google, and Amazon are all closing candidates at your level this week).
+Your `blind_level_terms` are inferred from your resume on first run. You can review and edit them in `data/parsed_resume.json → blind_level_terms`. The more accurate these are, the better the Blind offer signal ("PMTS vs E6 vs L7 offer comparison" confirms Oracle, Google, and Amazon are all closing candidates at your level this week).
 
 ---
 
@@ -186,6 +197,7 @@ playwright install chromium  # For Google Careers scraping
 ```bash
 cp .env.example .env
 # GROQ_API_KEY=       ← required (free at console.groq.com)
+# GEMINI_API_KEY=     ← recommended (free at aistudio.google.com — primary scorer, 1M tokens/min)
 # APOLLO_API_KEY=     ← optional (free at app.apollo.io)
 # GITHUB_TOKEN=       ← optional (raises GitHub rate limit: 60 → 5000 req/hr)
 ```
@@ -257,7 +269,9 @@ Review `data/parsed_resume.json` and optionally edit:
 
 | Service | Cost |
 |---------|------|
-| Groq (scoring + resume parse) | Free (30 req/min) |
+| Gemini 2.0 Flash (scoring — primary if key set) | Free (1500 req/day, 1M tokens/min via Google AI Studio) |
+| Groq llama-3.3-70b (scoring — primary without Gemini) | Free (100k tokens/day) |
+| Groq llama-3.1-8b-instant (auto fallback) | Free (500k tokens/day) |
 | Apollo People Search | Free (no credits consumed) |
 | JobSpy, Greenhouse, Lever, HN API | Free (open source / public) |
 | Levels.fyi (jobs + salary + offers) | Free (public endpoints) |
@@ -267,8 +281,12 @@ Review `data/parsed_resume.json` and optionally edit:
 ## Resilience
 
 Every source in try/except. If one fails, log and continue. Pipeline never crashes.
-Check `data/jobclaw.log` for details.
+Check `logs/` for details.
 
 ## License
 
 MIT
+
+---
+
+*Inspired in part by [job_market_intelligence_bot](https://github.com/MariyaSha/job_market_intelligence_bot) by MariyaSha.*

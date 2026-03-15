@@ -166,6 +166,7 @@ def _extract_company_names(text: str) -> list[str]:
 # ─── 1. LinkedIn Hiring Posts (bulk pool) ─────────────────────
 
 _hiring_posts_pool: dict[str, list[dict]] | None = None
+_hiring_profiles_pool: dict[str, list[dict]] | None = None
 
 
 def _build_hiring_posts_pool(hm_titles: list[str], target_roles: list[str]) -> dict[str, list[dict]]:
@@ -267,6 +268,84 @@ def _hiring_posts_direct(company: str) -> list[dict]:
     return posts
 
 
+# ─── 1b. LinkedIn Hiring Profiles (people with "Hiring" badge) ───
+
+_hiring_profiles_pool: dict[str, list[dict]] | None = None
+
+
+def _build_hiring_profiles_pool(hm_titles: list[str]) -> dict[str, list[dict]]:
+    """Search site:linkedin.com/in for people with a "Hiring" badge on their profile.
+    These are HMs/recruiters who have the 🔵 Hiring frame on their profile picture
+    and often list their open roles directly on their profile.
+    """
+    log.info("Building hiring profiles pool (LinkedIn /in with Hiring badge)...")
+    queries = []
+    for title in hm_titles[:4]:
+        queries.append(f'site:linkedin.com/in "{title}" "Hiring"')
+        queries.append(f'site:linkedin.com/in "{title}" "Currently hiring" OR "We are hiring"')
+    queries.append('site:linkedin.com/in "Director of Engineering" "Hiring" 2026')
+    queries.append('site:linkedin.com/in "VP Engineering" "Hiring" 2026')
+
+    pool: dict[str, list[dict]] = {}
+    seen_urls: set[str] = set()
+
+    for q in queries[:8]:
+        for r in _search(q, num=5):
+            url = r.get("url", "")
+            if url in seen_urls or "linkedin.com/in/" not in url:
+                continue
+            seen_urls.add(url)
+            title_text = r.get("title", "")
+            snippet = r.get("snippet", "")
+
+            # Extract person name from title like "Jane Smith - Director... | LinkedIn"
+            person = re.sub(r'\s*[-|].*', '', title_text).strip()
+
+            # Extract company from snippet or title
+            text = title_text + " " + snippet
+            m = re.search(r'\bat\s+([A-Z][A-Za-z0-9][A-Za-z0-9\s\.\-]{1,30}?)(?:\s*[,!.\n]|$)', text)
+            company_hint = m.group(1).strip() if m else ""
+
+            profile = {"person": person, "snippet": snippet[:200], "url": url, "company_hint": company_hint}
+
+            names = ([company_hint] if company_hint else []) + _extract_company_names(text)
+            for name in set(names):
+                key = name.lower()
+                if len(key) > 3:
+                    pool.setdefault(key, []).append(profile)
+
+    log.info(f"Hiring profiles pool: {len(seen_urls)} profiles → {len(pool)} company keys")
+    return pool
+
+
+def _hiring_profiles(company: str) -> list[dict]:
+    """Look up company in the profiles pool; return matching HM profiles with Hiring badge."""
+    global _hiring_profiles_pool
+    if _hiring_profiles_pool is None:
+        return []
+
+    key = company.lower().strip()
+    matches: list[dict] = []
+    seen_urls: set[str] = set()
+    for word in key.split():
+        if len(word) > 3:
+            for p in _hiring_profiles_pool.get(word, []):
+                if p["url"] not in seen_urls:
+                    seen_urls.add(p["url"])
+                    matches.append(p)
+
+    # Pool miss — one targeted search
+    if not matches:
+        for r in _search(f'site:linkedin.com/in "{company}" "Hiring"', num=3):
+            if "linkedin.com/in/" not in r.get("url", "") or r["url"] in seen_urls:
+                continue
+            seen_urls.add(r["url"])
+            person = re.sub(r'\s*[-|].*', '', r.get("title", "")).strip()
+            matches.append({"person": person, "snippet": r["snippet"][:200], "url": r["url"], "company_hint": company})
+
+    return matches[:3]
+
+
 # ─── 2. Blind Offers (bulk pool) ──────────────────────────────
 
 _blind_offer_pool: dict[str, list[str]] | None = None
@@ -365,21 +444,47 @@ def _layoff_check(company: str) -> dict:
 
 # ─── 5. Levels.fyi Salary ─────────────────────────────────────
 
+_TC_PAT  = re.compile(r'\$[\d,]+[kK]?\s*[-–]\s*\$[\d,]+[kK]?')
+_BASE_PAT = re.compile(r'[Bb]ase[^$\n]{0,20}\$[\d,]+[kK]?')
+
+
+def _parse_salary_text(text: str) -> dict:
+    data: dict = {"base_range": "", "tc_range": ""}
+    tc = _TC_PAT.findall(text)
+    if tc:
+        data["tc_range"] = tc[0]
+    base = _BASE_PAT.findall(text)
+    if base:
+        data["base_range"] = base[0][:80]
+    return data
+
+
 def _levels_salary(company: str) -> dict:
     slug = re.sub(r'[^a-z0-9-]', '', company.lower().replace(" ", "-"))
     data = {"base_range": "", "tc_range": "", "source": "levels.fyi"}
+
+    # Try the structured .md endpoint first
     try:
         resp = _S.get(f"https://www.levels.fyi/companies/{slug}/salaries.md", timeout=10)
         if resp.status_code == 200 and len(resp.text) > 100:
-            text = resp.text[:3000]
-            tc = re.findall(r'\$[\d,]+[kK]?\s*[-–]\s*\$[\d,]+[kK]?', text)
-            if tc:
-                data["tc_range"] = tc[0]
-            base = re.findall(r'[Bb]ase.*?\$[\d,]+', text)
-            if base:
-                data["base_range"] = base[0][:100]
+            parsed = _parse_salary_text(resp.text[:3000])
+            data.update(parsed)
     except Exception:
         pass
+
+    # Fallback: search for salary snippets when endpoint returned nothing
+    if not data["tc_range"] and not data["base_range"]:
+        results = _search(f'site:levels.fyi "{company}" salary base TC 2024 2025 2026', num=4)
+        for r in results:
+            snippet = r.get("title", "") + " " + r.get("snippet", "")
+            parsed = _parse_salary_text(snippet)
+            if parsed["tc_range"] and not data["tc_range"]:
+                data["tc_range"] = parsed["tc_range"]
+            if parsed["base_range"] and not data["base_range"]:
+                data["base_range"] = parsed["base_range"]
+            if data["tc_range"]:
+                break
+
     return data
 
 
@@ -395,12 +500,23 @@ def _funding_signal(company: str) -> str:
 
 # ─── 7. Levels.fyi Offer Submissions ─────────────────────────
 
-def _levels_offers(company: str) -> list[str]:
+def _levels_offers(company: str) -> list[dict]:
+    """Return recent offer submissions from levels.fyi for this company.
+    Each entry: {snippet, tc_range}. Recent submissions = company is actively interviewing.
+    """
     results = _search(f'site:levels.fyi "{company}" offer OR submission 2025 2026', num=5)
     offers = []
     for r in results:
-        if any(kw in r.get("snippet", "").lower() for kw in ["offer", "submitted", "accepted", "tc", "compensation"]):
-            offers.append(r["snippet"][:200])
+        snippet = r.get("snippet", "")
+        title   = r.get("title", "")
+        combined = title + " " + snippet
+        if not any(kw in combined.lower() for kw in ["offer", "submitted", "accepted", "tc", "compensation", "base"]):
+            continue
+        parsed = _parse_salary_text(combined)
+        offers.append({
+            "snippet": snippet[:200],
+            "tc_range": parsed.get("tc_range", ""),
+        })
     return offers[:3]
 
 
@@ -414,6 +530,11 @@ def _enrich_company(company: str, keywords: list[str]) -> dict:
         signals["hiring_posts"] = _hiring_posts(company, keywords)
     except Exception:
         signals["hiring_posts"] = []
+
+    try:
+        signals["hiring_profiles"] = _hiring_profiles(company)
+    except Exception:
+        signals["hiring_profiles"] = []
 
     try:
         signals["blind_offers"] = _blind_offers(company)
@@ -444,6 +565,13 @@ def _enrich_company(company: str, keywords: list[str]) -> dict:
         signals["levels_offers"] = _levels_offers(company)
     except Exception:
         signals["levels_offers"] = []
+
+    # Back-fill salary.tc_range from offer submissions when _levels_salary found nothing
+    if not signals["salary"].get("tc_range"):
+        for offer in signals["levels_offers"]:
+            if offer.get("tc_range"):
+                signals["salary"]["tc_range"] = offer["tc_range"]
+                break
 
     return signals
 
@@ -484,18 +612,20 @@ def run_signals(resume: dict) -> list[dict]:
     log.info(f"{len(todo)} new companies to enrich, {len(company_cache)} cached")
 
     if todo:
-        # ── Phase A: Bulk pool builds in parallel (3 workers, no interdependencies) ──
-        log.info("Pre-fetching bulk pools in parallel (Blind offers, hiring posts, layoffs)...")
-        global _blind_offer_pool, _layoffs_pool, _hiring_posts_pool
+        # ── Phase A: Bulk pool builds in parallel (4 workers, no interdependencies) ──
+        log.info("Pre-fetching bulk pools in parallel (Blind offers, hiring posts, hiring profiles, layoffs)...")
+        global _blind_offer_pool, _layoffs_pool, _hiring_posts_pool, _hiring_profiles_pool
         hm_titles = resume.get("hm_titles_above_me", [])
         target_roles = resume.get("target_roles", [])
-        with ThreadPoolExecutor(max_workers=3) as pool_executor:
-            blind_fut   = pool_executor.submit(_build_blind_offer_pool)
-            layoffs_fut = pool_executor.submit(_build_layoffs_pool)
-            hiring_fut  = pool_executor.submit(_build_hiring_posts_pool, hm_titles, target_roles)
-            _blind_offer_pool   = blind_fut.result()
-            _layoffs_pool       = layoffs_fut.result()
-            _hiring_posts_pool  = hiring_fut.result()
+        with ThreadPoolExecutor(max_workers=4) as pool_executor:
+            blind_fut    = pool_executor.submit(_build_blind_offer_pool)
+            layoffs_fut  = pool_executor.submit(_build_layoffs_pool)
+            hiring_fut   = pool_executor.submit(_build_hiring_posts_pool, hm_titles, target_roles)
+            profiles_fut = pool_executor.submit(_build_hiring_profiles_pool, hm_titles)
+            _blind_offer_pool     = blind_fut.result()
+            _layoffs_pool         = layoffs_fut.result()
+            _hiring_posts_pool    = hiring_fut.result()
+            _hiring_profiles_pool = profiles_fut.result()
 
         # ── Phase B: Parallel per-company enrichment ──
         cache_lock = threading.Lock()
@@ -534,7 +664,7 @@ def run_signals(resume: dict) -> list[dict]:
     for job in scored:
         company = job.get("company", "")
         job["signals"] = company_cache.get(company, {
-            "hiring_posts": [], "blind_offers": [],
+            "hiring_posts": [], "hiring_profiles": [], "blind_offers": [],
             "blind_sentiment": {"positive": [], "negative": [], "red_flags": False},
             "layoffs": {"had_layoffs": False, "detail": ""},
             "salary": {"base_range": "", "tc_range": "", "source": ""},

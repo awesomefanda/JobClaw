@@ -1,15 +1,32 @@
+# API keys / secrets
 .env
+.env.*
+
+# Personal / local files (resume, connections, local overrides)
+.local/
+connections.csv
+
+# Runtime data
 data/jobs.csv
 data/scored.json
 data/scored_ids.txt
 data/signals.json
+data/signals_cache.json
 data/enriched.json
+data/field_leads.json
 data/parsed_resume.json
 data/reports/
-data/jobclaw.log
 data/google_jobs/
 data/parsed_google_jobs/
-connections.csv
+
+# Logs
+logs/
+*.log
+
+# Claude Code local settings (machine-specific)
+.claude/
+
+# Python
 __pycache__/
 *.pyc
 *.egg-info/
@@ -17,8 +34,10 @@ dist/
 build/
 .venv/
 venv/
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Runtime
 .jobclaw.pid
-*.log
-.local

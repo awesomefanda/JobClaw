@@ -6,6 +6,7 @@ Handles:
   - One-time Groq call to structure a PDF/DOCX resume
   - Loading LinkedIn connections CSV
 """
+import io
 import os
 import csv
 import json
@@ -30,6 +31,7 @@ def env(key: str, default: str = "") -> str:
     return os.environ.get(key, default)
 
 GROQ_API_KEY    = env("GROQ_API_KEY")
+GEMINI_API_KEY  = env("GEMINI_API_KEY")     # optional — free at aistudio.google.com (fallback scorer)
 APOLLO_API_KEY  = env("APOLLO_API_KEY")
 GITHUB_TOKEN    = env("GITHUB_TOKEN")       # optional — raises rate limit from 60 to 5000 req/hr
 MIN_FIT_SCORE   = float(env("MIN_FIT_SCORE", "0.75"))
@@ -220,19 +222,24 @@ def load_connections() -> dict[str, list[dict]]:
     count = 0
     try:
         with open(csv_path, "r", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                first = (row.get("First Name", "") or "").strip()
-                last = (row.get("Last Name", "") or "").strip()
-                company = (row.get("Company", "") or "").strip()
-                if not company:
-                    continue
-                index.setdefault(company.lower(), []).append({
-                    "name": f"{first} {last}".strip(),
-                    "position": (row.get("Position", "") or "").strip(),
-                    "email": (row.get("Email Address", "") or row.get("Email", "") or "").strip(),
-                })
-                count += 1
+            # LinkedIn exports start with 3 lines of notes before the real header
+            raw = f.read()
+        lines = raw.splitlines()
+        # Find the line that contains "First Name" — that's the real header
+        header_idx = next((i for i, l in enumerate(lines) if l.strip().startswith("First Name")), 0)
+        reader = csv.DictReader(io.StringIO("\n".join(lines[header_idx:])))
+        for row in reader:
+            first = (row.get("First Name", "") or "").strip()
+            last = (row.get("Last Name", "") or "").strip()
+            company = (row.get("Company", "") or "").strip()
+            if not company:
+                continue
+            index.setdefault(company.lower(), []).append({
+                "name": f"{first} {last}".strip(),
+                "position": (row.get("Position", "") or "").strip(),
+                "email": (row.get("Email Address", "") or row.get("Email", "") or "").strip(),
+            })
+            count += 1
     except Exception as e:
         log.error(f"Error reading connections.csv: {e}")
         return {}
