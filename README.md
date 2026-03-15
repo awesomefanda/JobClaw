@@ -6,6 +6,7 @@ Drop your resume. Get an Excel report with ranked leads, contacts, salary data, 
 
 ```bash
 pip install -r requirements.txt
+playwright install chromium    # for Google Careers scraping
 cp .env.example .env           # add GROQ_API_KEY (free at console.groq.com)
 cp ~/Downloads/resume.pdf .    # drop your resume (PDF or DOCX)
 python run.py                  # → open data/reports/*.xlsx
@@ -34,7 +35,7 @@ JobClaw infers EVERYTHING from the resume:
 Cached at data/parsed_resume.json — edit if you want, but you don't have to.
 ```
 
-### Phase 1: DISCOVER (9 sources, zero AI cost)
+### Phase 1: DISCOVER (10 sources, zero AI cost)
 
 Inspired by Andrej Karpathy's job scraping methodology: resilient Playwright-based scraping with local HTML caching for offline iteration and LLM analysis.
 
@@ -49,10 +50,13 @@ Inspired by Andrej Karpathy's job scraping methodology: resilient Playwright-bas
 | 6 | **Wellfound** | Google (`site:wellfound.com`) | Startup jobs with equity + funding data |
 | 7 | **LinkedIn Hiring Posts** ⭐ | Google (`site:linkedin.com/posts`) | People above your level saying "I'm hiring" — **named contacts** |
 | 8 | **Blind Offer Feed** ⭐ | Google (`site:teamblind.com`) | "X vs Y vs Z" posts → companies **confirmed closing** candidates |
+| 9 | **Levels.fyi** | Public job listings | Level-aware roles with salary data attached |
 
 **Source 7 is special:** It searches for posts by people who HIRE at your level. If you're Staff, it finds Directors/VPs posting "building my team." Each post = a lead with the person's name, even if no job listing exists.
 
 **Source 8 is special:** "Airbnb vs Google vs Netflix E5 MLE" on Blind means all 3 companies gave offers this week. That's stronger proof of active hiring than any job listing.
+
+**Source 9 is special:** Levels.fyi listings are tagged by level (E5, L6, Staff, etc.) and come with real compensation data — base, equity, bonus — scraped from the same page as the job.
 
 ### Phase 2: SCORE (Groq — only AI cost)
 
@@ -68,12 +72,14 @@ For each unscored job in CSV:
 
 ```
 For each scored company:
-  • LinkedIn hiring posts    (Google search)
-  • Blind offer data         (Google search)
-  • Blind sentiment / PIP    (Google search)
-  • Layoff check             (layoffs.fyi via Google)
-  • Levels.fyi salary        (public .md endpoint)
-  • Funding signals          (Google search)
+  • LinkedIn hiring posts       (Google search)
+  • Blind offer data            (Google search)
+  • Blind sentiment / PIP       (Google search)
+  • Layoff check                (layoffs.fyi via Google)
+  • Levels.fyi salary + offers  (public .md endpoint + Google)
+  • Funding signals             (Google search)
+
+Results cached in signals_cache.json — re-runs skip already-enriched companies.
 ```
 
 ### Phase 3b: CONTACTS & RANKING
@@ -82,11 +88,15 @@ For each scored company:
 For each match:
   • Apollo People Search (FREE) → HM name + LinkedIn URL
   • Connections CSV → people you know at the company
-  • GitHub CLI Contributors → engineers from similar CLI tools (aws-cli, azure-cli, etc.)
+  • Field leads (resume-driven) → engineers in your tech field who could refer:
+      - GitHub contributors to repos in your stack
+      - dev.to authors writing about your technologies
+      - Stack Overflow top answerers in your tags
+      - Hacker News users active in your domain
   • Cross-reference all sources
 
 Best contact priority:
-  your_connection > hiring_post_author > apollo_contact > founder_email
+  your_connection > hiring_post_author > apollo_contact > founder_email > field_lead
 
 action_score = fit_score
   + 0.25 if founder email available (HN/YC)
@@ -97,7 +107,7 @@ action_score = fit_score
   + 0.12 if Levels.fyi offer submissions found
   + 0.10 if hiring post author is your connection (GOLDEN)
   + 0.10 if Apollo found HM
-  + 0.08 if CLI contributors available (networking in same field)
+  + 0.08 if field leads found (engineers in same field)
   + 0.05 if recently funded
   + 0.05 if no layoffs
   - 0.10 if Blind red flags
@@ -134,6 +144,20 @@ TIER 6:  Job listing alone (Track B)
 | Director | VPs, SVPs, CTOs | Director, D1, D2 | LinkedIn-heavy |
 | VP+ | CEOs, board posts | VP, SVP | LinkedIn-heavy |
 
+### Cross-Company Level Mapping (via Levels.fyi)
+
+Your title at one company rarely maps 1:1 to another. JobClaw uses Levels.fyi's level equivalency data to search Blind correctly regardless of where you work:
+
+| Your title | Your company | Equivalent levels searched on Blind/Levels.fyi |
+|---|---|---|
+| PMTS | Oracle | E5, E6, L6, Staff, Principal |
+| Staff Engineer | Google | E6, L6, Staff |
+| Principal Engineer | Amazon | L7, E7, Principal |
+| Senior Engineer II | Microsoft | E5, L5, Senior2 |
+| Staff Engineer | Meta | E6, Staff |
+
+Groq infers your `blind_level_terms` from your resume on first run. You can review and edit them in `data/parsed_resume.json → blind_level_terms`. The more accurate these are, the better the Blind offer signal ("PMTS vs E6 vs L7 offer comparison" confirms Oracle, Google, and Amazon are all closing candidates at your level this week).
+
 ---
 
 ## Setup
@@ -150,6 +174,7 @@ playwright install chromium  # For Google Careers scraping
 cp .env.example .env
 # GROQ_API_KEY=       ← required (free at console.groq.com)
 # APOLLO_API_KEY=     ← optional (free at app.apollo.io)
+# GITHUB_TOKEN=       ← optional (raises GitHub rate limit: 60 → 5000 req/hr)
 ```
 
 ### 3. Resume (pick one)
@@ -176,6 +201,27 @@ nohup ./exec_loop.sh > data/loop.log 2>&1 &   # Linux/Mac
 # Windows: Task Scheduler → python run.py hourly
 ```
 
+## Incremental Runs
+
+Run it daily or every few days — it only does new work:
+
+| Phase | Day 1 | Day 3 |
+|---|---|---|
+| **Scout** | Scrapes all sources | JobSpy fetches only jobs posted in last `hours_old` (default 72h). Greenhouse/Lever/HN re-scrape but dedup by ID — already-seen jobs are skipped. |
+| **Scorer** | Scores all new jobs | Only scores jobs not in `scored_ids.txt`. Day 1 jobs never re-scored. |
+| **Signals** | Fetches web intel for all companies | Skips companies already in `signals_cache.json`. Only new companies from day 3 are fetched. |
+| **Contacts** | Finds contacts for all matches | Re-runs Apollo/connections for all (fast). Field leads reused from `field_leads.json`. |
+| **Report** | Generated | Regenerated from all accumulated data. |
+
+**On `date_posted`:** JobSpy passes through the posting date from Indeed/LinkedIn/Glassdoor. Most other sources (Greenhouse, Lever, HN posts, LinkedIn hiring posts, Blind) don't expose a reliable post date — those fields are left blank. The `hours_old` filter in `data/parsed_resume.json → scout.hours_old` controls how far back JobSpy looks (default: 72h).
+
+**To force a full re-run** of a phase, delete the relevant cache file:
+```bash
+rm data/scored_ids.txt      # re-score everything
+rm data/signals_cache.json  # re-fetch all signals
+rm data/field_leads.json    # re-fetch GitHub/dev.to/SO leads
+```
+
 ## After First Run
 
 Review `data/parsed_resume.json` and optionally edit:
@@ -192,7 +238,8 @@ Review `data/parsed_resume.json` and optionally edit:
 | Groq (scoring + resume parse) | Free (30 req/min) |
 | Apollo People Search | Free (no credits consumed) |
 | JobSpy, Greenhouse, Lever, HN API | Free (open source / public) |
-| Google Search, Levels.fyi, Blind | Free |
+| Levels.fyi (jobs + salary + offers) | Free (public endpoints) |
+| Google Search, Blind | Free |
 | Playwright (Google Careers) | Free (open source) |
 
 ## Resilience

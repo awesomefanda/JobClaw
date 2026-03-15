@@ -24,6 +24,7 @@ log = get_logger("signals")
 DATA = Path(__file__).resolve().parent.parent / "data"
 SCORED_JSON = DATA / "scored.json"
 SIGNALS_JSON = DATA / "signals.json"
+SIGNALS_CACHE_JSON = DATA / "signals_cache.json"  # per-company cache across runs
 
 _S = requests.Session()
 _S.headers.update({
@@ -223,9 +224,18 @@ def run_signals(resume: dict) -> list[dict]:
         return []
 
     keywords = resume.get("scout", {}).get("hiring_post_keywords", resume.get("target_roles", []))
-    company_cache: dict[str, dict] = {}
 
-    log.info(f"Enriching {len(scored)} matches with signals")
+    # Load persistent per-company cache (survives across runs)
+    company_cache: dict[str, dict] = {}
+    if SIGNALS_CACHE_JSON.exists():
+        try:
+            company_cache = json.loads(SIGNALS_CACHE_JSON.read_text())
+            log.info(f"Loaded signals cache: {len(company_cache)} companies already enriched")
+        except Exception:
+            company_cache = {}
+
+    new_companies = sum(1 for j in scored if j.get("company", "") not in company_cache)
+    log.info(f"Enriching {len(scored)} matches ({new_companies} new companies, {len(scored) - new_companies} cached)")
 
     for i, job in enumerate(scored):
         company = job.get("company", "")
@@ -309,6 +319,8 @@ def run_signals(resume: dict) -> list[dict]:
 
         company_cache[company] = signals
         job["signals"] = signals
+        # Persist cache after each company so progress isn't lost on interrupt
+        SIGNALS_CACHE_JSON.write_text(json.dumps(company_cache, indent=2))
         time.sleep(1)
 
     SIGNALS_JSON.write_text(json.dumps(scored, indent=2))
