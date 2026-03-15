@@ -169,35 +169,35 @@ def load_resume() -> dict:
                 log.info("Parsing resume via Groq (one-time)...")
                 data = _parse_resume_with_groq(text)
                 if data:
-                # Auto-generate smart defaults based on parsed level
-                level = data.get("current_level", "senior")
-                is_mgr = data.get("is_manager", False)
+                    # Auto-generate smart defaults based on parsed level
+                    level = data.get("current_level", "senior")
+                    is_mgr = data.get("is_manager", False)
 
-                # Platforms: directors live on LinkedIn; ICs spread across boards
-                if level in ("director", "senior_director", "vp", "svp", "cto"):
-                    platforms = ["linkedin", "indeed", "google"]
-                else:
-                    platforms = ["indeed", "linkedin", "google", "glassdoor", "zip_recruiter"]
+                    # Platforms: directors live on LinkedIn; ICs spread across boards
+                    if level in ("director", "senior_director", "vp", "svp", "cto"):
+                        platforms = ["linkedin", "indeed", "google"]
+                    else:
+                        platforms = ["indeed", "linkedin", "google", "glassdoor", "zip_recruiter"]
 
-                data.setdefault("preferences", {"remote": True, "minimum_salary_usd": 200000})
-                data.setdefault("keywords_exclude", data.get("keywords_exclude", []))
-                data.setdefault("hm_titles_above_me", [])
-                data.setdefault("blind_level_terms", [])
-                data.setdefault("scout", {
-                    "platforms": platforms,
-                    "hours_old": 168,      # 7 days
-                    "max_results": 100,    # per platform per search term
-                    "greenhouse_boards": [],
-                    "lever_boards": [],
-                    "hiring_post_keywords": data.get("target_keywords", data.get("target_roles", [])),
-                })
-                PARSED_RESUME.write_text(json.dumps(data, indent=2))
-                log.info(f"Resume parsed and cached: {data.get('name', 'unknown')}")
-                log.info(f"Detected level: {level} | Track: {data.get('track', '?')} | Manager: {is_mgr}")
-                log.info(f"Target roles: {', '.join(data.get('target_roles', [])[:3])}...")
-                log.info(f"Hiring managers to find: {', '.join(data.get('hm_titles_above_me', [])[:3])}...")
-                log.info(f"Review/edit: data/parsed_resume.json")
-                return data
+                    data.setdefault("preferences", {"remote": True, "minimum_salary_usd": 200000})
+                    data.setdefault("keywords_exclude", data.get("keywords_exclude", []))
+                    data.setdefault("hm_titles_above_me", [])
+                    data.setdefault("blind_level_terms", [])
+                    data.setdefault("scout", {
+                        "platforms": platforms,
+                        "hours_old": 168,      # 7 days
+                        "max_results": 100,    # per platform per search term
+                        "greenhouse_boards": [],
+                        "lever_boards": [],
+                        "hiring_post_keywords": data.get("target_keywords", data.get("target_roles", [])),
+                    })
+                    PARSED_RESUME.write_text(json.dumps(data, indent=2))
+                    log.info(f"Resume parsed and cached: {data.get('name', 'unknown')}")
+                    log.info(f"Detected level: {level} | Track: {data.get('track', '?')} | Manager: {is_mgr}")
+                    log.info(f"Target roles: {', '.join(data.get('target_roles', [])[:3])}...")
+                    log.info(f"Hiring managers to find: {', '.join(data.get('hm_titles_above_me', [])[:3])}...")
+                    log.info(f"Review/edit: data/parsed_resume.json")
+                    return data
 
     log.error("No resume found. Place resume.pdf / resume.docx / resume.json in .local/ or project root.")
     return {}
