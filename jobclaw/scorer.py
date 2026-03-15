@@ -114,25 +114,24 @@ def _try_gemini(prompt: str, job_count: int) -> list[dict | None]:
     if not config.GEMINI_API_KEY:
         return None  # signal: not available
     try:
-        import google.generativeai as genai
+        from google import genai
     except ImportError:
-        log.warning("google-generativeai not installed — run: pip install google-generativeai")
+        log.warning("google-genai not installed — run: pip install google-genai")
         return None  # not available, fall through to Groq
 
-    genai.configure(api_key=config.GEMINI_API_KEY)
-    model = genai.GenerativeModel(GEMINI_FALLBACK_MODEL)
+    client = genai.Client(api_key=config.GEMINI_API_KEY)
 
     for attempt in range(3):
         try:
-            resp = model.generate_content(prompt)
+            resp = client.models.generate_content(model=GEMINI_FALLBACK_MODEL, contents=prompt)
             return _parse_response(resp.text.strip(), job_count)
         except json.JSONDecodeError as e:
             log.warning(f"Gemini JSON parse error: {e}")
             return [None] * job_count
         except Exception as e:
             err = str(e)
-            if "429" in err or "quota" in err.lower() or "rate" in err.lower():
-                wait = _parse_retry_seconds(err) or 5
+            if "429" in err or "RESOURCE_EXHAUSTED" in err or "quota" in err.lower():
+                wait = _parse_retry_seconds(err) or 10
                 log.warning(f"Gemini rate limited — waiting {wait:.0f}s before retry (attempt {attempt + 1}/3)...")
                 time.sleep(wait)
             else:
