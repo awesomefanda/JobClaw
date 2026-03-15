@@ -35,9 +35,11 @@ JobClaw infers EVERYTHING from the resume:
 Cached at data/parsed_resume.json — edit if you want, but you don't have to.
 ```
 
-### Phase 1: DISCOVER (10 sources, zero AI cost)
+### Phase 1: DISCOVER (10 sources, zero AI cost, fully parallel)
 
 Inspired by Andrej Karpathy's job scraping methodology: resilient Playwright-based scraping with local HTML caching for offline iteration and LLM analysis.
+
+All 10 sources run concurrently (5 workers). Total scout time ~same as the slowest single source.
 
 | # | Source | Method | What It Finds |
 |---|--------|--------|---------------|
@@ -71,28 +73,39 @@ For each unscored job in CSV:
 ### Phase 3a: SIGNALS (web intelligence, zero cost)
 
 ```
-For each scored company:
-  • LinkedIn hiring posts       (Google search)
-  • Blind offer data            (Google search)
-  • Blind sentiment / PIP       (Google search)
-  • Layoff check                (layoffs.fyi via Google)
-  • Levels.fyi salary + offers  (public .md endpoint + Google)
-  • Funding signals             (Google search)
+Step A — bulk pre-fetch (3 parallel workers, done once per run):
+  • Blind offer pool     → scrape recent offer posts, index by company name
+  • Layoffs pool         → scrape layoffs.fyi + tech news, build company set
+  • Hiring posts pool    → search by HM title/role, index by company name
+
+Step B — per-company enrichment (3 parallel workers):
+  • LinkedIn hiring posts   pool lookup + 1 fallback search on miss
+  • Blind offer data        pool lookup (instant, no extra search)
+  • Blind sentiment / PIP   2 targeted searches
+  • Layoff check            pool lookup (instant)
+  • Levels.fyi salary       direct HTTP endpoint
+  • Funding signals         1 targeted search
+  • Levels.fyi offers       1 targeted search
 
 Results cached in signals_cache.json — re-runs skip already-enriched companies.
+~5-6 min for 85 companies (vs ~30 min sequential).
 ```
 
 ### Phase 3b: CONTACTS & RANKING
 
 ```
+Setup (parallel):
+  • Apollo pre-fetched for all companies at once (3 workers)
+  • Field leads fetched in parallel: GitHub + dev.to + Stack Overflow + HN (4 workers)
+    - GitHub: contributors to repos in your stack (profiles enriched concurrently)
+    - dev.to: popular authors writing about your technologies
+    - Stack Overflow: top answerers in your tags
+    - Hacker News: active users discussing your domain
+
 For each match:
-  • Apollo People Search (FREE) → HM name + LinkedIn URL
-  • Connections CSV → people you know at the company
-  • Field leads (resume-driven) → engineers in your tech field who could refer:
-      - GitHub contributors to repos in your stack
-      - dev.to authors writing about your technologies
-      - Stack Overflow top answerers in your tags
-      - Hacker News users active in your domain
+  • Apollo People Search (FREE) → HM name + LinkedIn URL  (pre-fetched, instant)
+  • Connections CSV → people you know at the company       (in-memory, instant)
+  • Field leads → same-field engineers who could refer     (cached after first run)
   • Cross-reference all sources
 
 Best contact priority:
@@ -177,15 +190,24 @@ cp .env.example .env
 # GITHUB_TOKEN=       ← optional (raises GitHub rate limit: 60 → 5000 req/hr)
 ```
 
-### 3. Resume (pick one)
+### 3. Personal files → `.local/` (gitignored)
+
+Your resume and connections never get committed. Put them in `.local/`:
+
 ```bash
-cp ~/resume.pdf .       # Just drop it — auto-parsed
-# OR: cp ~/resume.docx .
-# OR: edit resume.json for full control
+mkdir -p .local
+cp ~/resume.pdf .local/          # auto-parsed via Groq on first run
+# OR: cp ~/resume.docx .local/
+# OR: cp ~/resume.json .local/   # full manual control
+
+# Optional: override API keys per-machine
+cp .env.example .local/.env      # .local/.env takes priority over .env
 ```
 
+JobClaw checks `.local/` first, then falls back to the project root.
+
 ### 4. Connections (optional)
-LinkedIn → Settings → Data Privacy → Get a copy of your data → Connections → save as `connections.csv`
+LinkedIn → Settings → Data Privacy → Get a copy of your data → Connections → save as `.local/connections.csv`
 
 ### 5. Run
 ```bash
