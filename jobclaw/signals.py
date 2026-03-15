@@ -51,12 +51,16 @@ _last_search_at: float = 0.0
 _SEARCH_INTERVAL = 0.5  # seconds between any two searches
 
 
-def _ddg(query: str, num: int = 5) -> list[dict]:
+def _ddg(query: str, num: int = 5, timelimit: str | None = None) -> list[dict]:
+    """timelimit: 'd'=day, 'w'=week, 'm'=month, 'y'=year, None=any."""
     try:
         from ddgs import DDGS
         results = []
+        kwargs = {"max_results": num}
+        if timelimit:
+            kwargs["timelimit"] = timelimit
         with DDGS() as ddgs:
-            for r in ddgs.text(query, max_results=num):
+            for r in ddgs.text(query, **kwargs):
                 results.append({
                     "title": r.get("title", ""),
                     "snippet": r.get("body", "")[:300],
@@ -66,6 +70,25 @@ def _ddg(query: str, num: int = 5) -> list[dict]:
     except Exception as e:
         log.debug(f"DDG search failed for '{query[:60]}': {e}")
         return []
+
+
+# Max age for hiring posts: 2 months
+_MAX_POST_AGE_MONTHS = 2
+
+
+def _post_age_ok(text: str) -> bool:
+    """Return False if the text contains a relative date indicating the post is too old.
+    LinkedIn snippets often contain '1 year ago', '8 months ago', etc.
+    Anything older than _MAX_POST_AGE_MONTHS is rejected.
+    """
+    tl = text.lower()
+    m = re.search(r'(\d+)\s+year', tl)
+    if m:
+        return False  # any "X year(s) ago" is too old
+    m = re.search(r'(\d+)\s+month', tl)
+    if m and int(m.group(1)) > _MAX_POST_AGE_MONTHS:
+        return False
+    return True
 
 
 def _google(query: str, num: int = 5) -> list[dict]:
@@ -104,7 +127,7 @@ def _google(query: str, num: int = 5) -> list[dict]:
         return []
 
 
-def _search(query: str, num: int = 5) -> list[dict]:
+def _search(query: str, num: int = 5, timelimit: str | None = None) -> list[dict]:
     """Throttled unified search: DDG first, Google fallback."""
     global _last_search_at
     with _search_sem:
@@ -113,7 +136,7 @@ def _search(query: str, num: int = 5) -> list[dict]:
             if wait > 0:
                 time.sleep(wait)
             _last_search_at = time.time()
-        results = _ddg(query, num)
+        results = _ddg(query, num, timelimit=timelimit)
         if not results:
             log.debug(f"DDG empty — trying Google for: {query[:60]}")
             with _search_lock:
@@ -164,14 +187,17 @@ def _build_hiring_posts_pool(hm_titles: list[str], target_roles: list[str]) -> d
     seen_urls: set[str] = set()
 
     for q in queries[:8]:
-        for r in _search(q, num=5):
+        for r in _search(q, num=5, timelimit='m'):
             url = r.get("url", "")
             if url in seen_urls or "linkedin.com" not in url:
                 continue
-            seen_urls.add(url)
-
             title = r.get("title", "")
             snippet = r.get("snippet", "")
+            # Reject posts older than _MAX_POST_AGE_MONTHS
+            if not _post_age_ok(title + " " + snippet):
+                continue
+            seen_urls.add(url)
+
             poster = title.split(" on LinkedIn")[0].strip() if " on LinkedIn" in title else ""
 
             # Extract "at CompanyName" from text
@@ -209,10 +235,12 @@ def _hiring_posts(company: str, keywords: list[str]) -> list[dict]:
                     seen_urls.add(post["url"])
                     matches.append(post)
 
-    # Pool miss — one targeted fallback search
+    # Pool miss — one targeted fallback search (last month only)
     if not matches:
-        for r in _search(f'site:linkedin.com/posts "{company}" "hiring" 2026', num=3):
+        for r in _search(f'site:linkedin.com/posts "{company}" "hiring"', num=3, timelimit='m'):
             if "linkedin.com" not in r.get("url", "") or r["url"] in seen_urls:
+                continue
+            if not _post_age_ok(r.get("title", "") + " " + r.get("snippet", "")):
                 continue
             poster = r["title"].split(" on LinkedIn")[0].strip() if " on LinkedIn" in r["title"] else ""
             matches.append({"poster": poster, "snippet": r["snippet"][:200], "url": r["url"]})
@@ -228,8 +256,10 @@ def _hiring_posts_direct(company: str) -> list[dict]:
         f'site:linkedin.com/posts "{company}" "hiring"',
         f'site:linkedin.com/posts "{company}" "join my team"',
     ]:
-        for r in _search(q, num=3):
+        for r in _search(q, num=3, timelimit='m'):
             if r["url"] in seen or "linkedin.com" not in r["url"]:
+                continue
+            if not _post_age_ok(r.get("title", "") + " " + r.get("snippet", "")):
                 continue
             seen.add(r["url"])
             poster = r["title"].split(" on LinkedIn")[0].strip() if " on LinkedIn" in r["title"] else ""
