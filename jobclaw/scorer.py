@@ -119,79 +119,82 @@ def _try_gemini(prompt: str, job_count: int) -> list[dict | None]:
         log.warning("google-generativeai not installed — run: pip install google-generativeai")
         return None  # not available, fall through to Groq
 
-    try:
-        genai.configure(api_key=config.GEMINI_API_KEY)
-        model = genai.GenerativeModel(GEMINI_FALLBACK_MODEL)
-        resp = model.generate_content(prompt)
-        return _parse_response(resp.text.strip(), job_count)
-    except json.JSONDecodeError as e:
-        log.warning(f"Gemini JSON parse error: {e}")
-        return [None] * job_count
-    except Exception as e:
-        err = str(e)
-        if "429" in err or "quota" in err.lower() or "rate" in err.lower():
-            log.warning(f"Gemini rate limited — falling back to Groq")
-            return "RATE_LIMITED"
-        log.warning(f"Gemini error: {e}")
-        return None  # unexpected error, fall through to Groq
+    genai.configure(api_key=config.GEMINI_API_KEY)
+    model = genai.GenerativeModel(GEMINI_FALLBACK_MODEL)
 
-
-def _try_groq(client, prompt: str, job_count: int) -> list[dict | None]:
-    active_model = config.GROQ_MODEL
-    tried_fallback = False
-
-    for _ in range(3):
+    for attempt in range(3):
         try:
-            resp = client.chat.completions.create(
-                model=active_model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=700 * job_count,
-                temperature=0.3,
-            )
-            return _parse_response(resp.choices[0].message.content.strip(), job_count)
+            resp = model.generate_content(prompt)
+            return _parse_response(resp.text.strip(), job_count)
         except json.JSONDecodeError as e:
-            log.warning(f"Groq JSON parse error: {e}")
+            log.warning(f"Gemini JSON parse error: {e}")
             return [None] * job_count
         except Exception as e:
             err = str(e)
-            if "429" in err or "rate_limit" in err.lower():
-                if not tried_fallback:
-                    log.warning(f"Rate limit on {active_model} — switching to {GROQ_FALLBACK_MODEL}")
-                    active_model = GROQ_FALLBACK_MODEL
-                    tried_fallback = True
-                    continue
-                wait = _parse_retry_seconds(err)
-                log.warning(f"Rate limit on {active_model} — exhausted Groq options")
-                if wait > 0:
-                    log.warning(f"(Groq asks to wait {wait:.0f}s — try setting GEMINI_API_KEY to avoid this)")
-                return "RATE_LIMITED"
+            if "429" in err or "quota" in err.lower() or "rate" in err.lower():
+                wait = _parse_retry_seconds(err) or 5
+                log.warning(f"Gemini rate limited — waiting {wait:.0f}s before retry (attempt {attempt + 1}/3)...")
+                time.sleep(wait)
             else:
-                log.warning(f"Groq error: {e}")
-                return [None] * job_count
+                log.warning(f"Gemini error: {e}")
+                return None  # unexpected error, fall through to Groq
 
+    log.warning("Gemini rate limit persists — falling back to Groq")
     return "RATE_LIMITED"
 
 
-def _score_batch(client, resume: dict, jobs: list[dict]) -> list[dict | None]:
-    """Score a batch. Uses Gemini first if key available, otherwise Groq."""
+def _try_groq(client, prompt: str, job_count: int, model: str | None = None) -> list[dict | None]:
+    active_model = model or config.GROQ_MODEL
+    tried_fallback = False
+
+    try:
+        resp = client.chat.completions.create(
+            model=active_model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=700 * job_count,
+            temperature=0.3,
+        )
+        return _parse_response(resp.choices[0].message.content.strip(), job_count)
+    except json.JSONDecodeError as e:
+        log.warning(f"Groq JSON parse error ({active_model}): {e}")
+        return [None] * job_count
+    except Exception as e:
+        err = str(e)
+        if "429" in err or "rate_limit" in err.lower():
+            return "RATE_LIMITED"
+        log.warning(f"Groq error ({active_model}): {e}")
+        return [None] * job_count
+
+
+def _score_batch(client, resume: dict, jobs: list[dict], provider_idx: int = 0) -> list[dict | None]:
+    """Score a batch.
+
+    Strategy (optimised for free tiers, longer-run friendly):
+      1. Gemini 2.0 Flash — used for every batch; waits out rate limits rather
+         than burning Groq's much smaller daily token budget.
+      2. Groq llama-3.3-70b — emergency fallback only (Gemini unavailable/broken).
+      3. Groq llama-3.1-8b-instant — last resort.
+    """
     prompt = _build_prompt(resume, jobs)
     job_count = len(jobs)
 
+    # Primary: Gemini (wait out rate limits, don't fall back just for throttling)
     if config.GEMINI_API_KEY:
         result = _try_gemini(prompt, job_count)
-        if result is None:
-            pass  # GEMINI_API_KEY was set but genai unavailable — fall through
-        elif result != "RATE_LIMITED":
+        if result is not None and result != "RATE_LIMITED":
             return result
-        else:
-            log.warning("Gemini rate limited — falling back to Groq")
+        if result == "RATE_LIMITED":
+            # Gemini daily quota truly exhausted — fall through to Groq
+            log.warning("Gemini daily quota exhausted — falling back to Groq for remaining batches")
 
+    # Emergency fallback: Groq (preserve for when Gemini is genuinely unavailable)
     if config.GROQ_API_KEY:
-        result = _try_groq(client, prompt, job_count)
-        if result != "RATE_LIMITED":
-            return result
-        log.warning("All scoring providers rate limited for this batch — skipping")
+        for model in [config.GROQ_MODEL, GROQ_FALLBACK_MODEL]:
+            result = _try_groq(client, prompt, job_count, model=model)
+            if result is not None and result != "RATE_LIMITED":
+                return result
 
+    log.warning("All providers exhausted for this batch — skipping")
     return [None] * job_count
 
 
@@ -253,7 +256,7 @@ def run_scorer(resume: dict) -> list[dict]:
 
         # Brief pause between batches to respect per-minute rate limits
         if batch_idx < total_batches - 1:
-            time.sleep(3)
+            time.sleep(5)  # 5s keeps us under Gemini's 15 RPM free-tier limit
 
     SCORED_JSON.write_text(json.dumps(matches, indent=2))
     log.info(f"Total matches: {len(matches)} (saved to scored.json)")
