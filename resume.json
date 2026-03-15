@@ -1,0 +1,44 @@
+{
+  "_comment": "OPTIONAL — only if you want full manual control. Otherwise just drop resume.pdf and JobClaw auto-parses everything.",
+
+  "name": "Your Name",
+  "email": "you@email.com",
+  "phone": "+1234567890",
+  "linkedin_url": "https://linkedin.com/in/yourprofile",
+  "location": "San Francisco, CA",
+  "experience_years": 12,
+
+  "current_level": "staff",
+  "is_manager": false,
+  "track": "ic",
+
+  "summary": "12+ years building CLI tools, developer SDKs, and AI-powered developer tooling.",
+
+  "technical_skills": ["Java", "Python", "CLI architecture", "SDK design", "AI agents", "cloud infrastructure"],
+  "domain_expertise": ["CLI/SDK platform engineering", "AI-powered developer tooling", "Cloud infrastructure"],
+
+  "target_roles": [
+    "Principal Software Engineer",
+    "Staff Software Engineer",
+    "Principal Engineer",
+    "Staff Platform Engineer",
+    "Senior Staff Engineer"
+  ],
+  "target_keywords": ["principal engineer", "staff engineer", "developer tools", "CLI", "platform engineer"],
+  "keywords_exclude": ["frontend", "React Native", "mobile", "iOS", "Android UI"],
+
+  "hm_titles_above_me": ["Engineering Manager", "Director of Engineering", "VP Engineering", "Head of Engineering"],
+  "blind_level_terms": ["E5", "E6", "L6", "L7", "Staff", "Principal", "IC5", "IC6"],
+
+  "education": "Bachelors in Computer Science",
+  "preferences": { "remote": true, "minimum_salary_usd": 250000 },
+
+  "scout": {
+    "platforms": ["indeed", "linkedin", "google", "glassdoor", "zip_recruiter"],
+    "hours_old": 168,
+    "max_results": 100,
+    "greenhouse_boards": ["databricks", "stripe", "cloudflare", "temporal", "vercel", "supabase"],
+    "lever_boards": ["cloudflare", "netflix"],
+    "hiring_post_keywords": ["principal engineer", "staff engineer", "developer tools", "CLI platform"]
+  }
+}
