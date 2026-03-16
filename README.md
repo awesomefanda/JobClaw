@@ -51,6 +51,7 @@ All 10 sources run concurrently (5 workers). Total scout time ~same as the slowe
 | 1b | **Google Careers** | Playwright scraper | Direct from careers.google.com — resilient to bot detection |
 | 2 | **Greenhouse** | Public JSON API (`boards-api.greenhouse.io`) | Direct career pages, no rate limit |
 | 3 | **Lever** | Public JSON API (`api.lever.co`) | Same — fast, direct |
+| 3b | **Ashby** | Public GraphQL API (`jobs.ashbyhq.com`) | 30+ hot startups pre-loaded: Linear, Vercel, Retool, Rippling, Notion, OpenAI, Anthropic, Supabase, Ramp, Brex… |
 | 4 | **YC Work at a Startup** | Google fallback | YC-backed startups, founders reachable |
 | 5 | **HN Who's Hiring** | Algolia API + Firebase | Founder posts with **direct emails** extracted |
 | 6 | **Wellfound** | Google (`site:wellfound.com`) | Startup jobs with equity + funding data |
@@ -281,6 +282,7 @@ rm data/field_leads.json    # re-fetch GitHub/dev.to/SO leads
 Review `data/parsed_resume.json` and optionally edit:
 - `target_roles` — add/remove titles
 - `scout.greenhouse_boards` — e.g. `["databricks", "stripe", "cloudflare"]`
+- `scout.ashby_boards` — extra Ashby slugs beyond the 30 pre-loaded defaults
 - `scout.max_results` — increase up to 1000 (Indeed unlimited, LinkedIn rate-limited)
 - `scout.hours_old` — 168 (7 days) or 336 (2 weeks)
 - `hm_titles_above_me` — titles of people who hire at your level

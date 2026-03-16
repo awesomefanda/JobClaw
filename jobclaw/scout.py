@@ -256,6 +256,96 @@ def _scrape_lever(boards: list[str]) -> list[dict]:
     return jobs
 
 
+# ─── Source 3b: Ashby ──────────────────────────────────────────
+
+# Well-known tech companies using Ashby — add more via scout.ashby_boards
+_DEFAULT_ASHBY_BOARDS = [
+    "linear", "vercel", "retool", "rippling", "notion", "figma", "loom",
+    "coda", "mercury", "ramp", "brex", "scale-ai", "openai", "anthropic",
+    "mistral", "cohere", "perplexity", "anyscale", "modal", "replicate",
+    "huggingface", "weights-and-biases", "langchain", "labelbox",
+    "replit", "cursor", "sourcegraph", "warp", "raycast",
+    "dbt-labs", "airbyte", "fivetran", "hightouch", "census",
+    "stytch", "clerk", "supabase", "planetscale", "neon", "turso",
+    "fly", "railway", "render", "northflank",
+    "ashby", "liveblocks", "cal", "knock", "resend", "loops",
+]
+
+_ASHBY_QUERY = """
+query ApiJobBoardWithTeams($organizationHostedJobsPageName: String!) {
+  jobBoard: jobBoardWithTeams(organizationHostedJobsPageName: $organizationHostedJobsPageName) {
+    jobPostings {
+      id title locationName employmentType isListed
+      compensation { summaryComponents { value label } }
+      jobPostingState externalLink
+    }
+  }
+}
+"""
+
+
+def _scrape_ashby(boards: list[str]) -> list[dict]:
+    jobs = []
+    now = datetime.now().isoformat()
+    all_boards = list(dict.fromkeys(_DEFAULT_ASHBY_BOARDS + boards))
+
+    for board in all_boards:
+        try:
+            resp = _SESSION.post(
+                "https://jobs.ashbyhq.com/api/non-user-graphql",
+                json={
+                    "operationName": "ApiJobBoardWithTeams",
+                    "variables": {"organizationHostedJobsPageName": board},
+                    "query": _ASHBY_QUERY,
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                log.debug(f"Ashby {board}: HTTP {resp.status_code}")
+                continue
+            postings = (resp.json()
+                        .get("data", {})
+                        .get("jobBoard", {})
+                        .get("jobPostings", []) or [])
+            company = board.replace("-", " ").title()
+            for j in postings:
+                if not j.get("isListed"):
+                    continue
+                loc = j.get("locationName", "") or ""
+                # Parse salary from compensation summary
+                salary_min = salary_max = ""
+                for comp in (j.get("compensation") or {}).get("summaryComponents", []):
+                    val = comp.get("value", "")
+                    if "$" in val:
+                        parts = val.replace("$", "").replace("K", "000").split("–")
+                        try:
+                            salary_min = str(int(float(parts[0].replace(",", "").strip())))
+                            if len(parts) > 1:
+                                salary_max = str(int(float(parts[1].replace(",", "").strip())))
+                        except (ValueError, IndexError):
+                            pass
+                        break
+                url = (j.get("externalLink") or
+                       f"https://jobs.ashbyhq.com/{board}/{j.get('id', '')}")
+                jobs.append({
+                    "id": _id(company, j.get("title", ""), loc),
+                    "title": j.get("title", ""), "company": company,
+                    "location": loc, "is_remote": str("Remote" in loc),
+                    "job_url": url,
+                    "salary_min": salary_min, "salary_max": salary_max,
+                    "job_type": j.get("employmentType", ""),
+                    "description": "", "date_posted": "",
+                    "source": "ashby", "founder_email": "", "scraped_at": now,
+                })
+        except Exception as e:
+            log.debug(f"Ashby {board} failed: {e}")
+
+    if jobs:
+        log.info(f"Ashby: {len(jobs)} listings from {len(all_boards)} boards")
+    return jobs
+
+
 # ─── Source 4: Y Combinator "Work at a Startup" ───────────────
 
 def _scrape_yc_jobs(target_roles: list[str]) -> list[dict]:
@@ -1440,6 +1530,7 @@ def run_scout(resume: dict) -> int:
 
     gh = resume.get("scout", {}).get("greenhouse_boards", [])
     lv = resume.get("scout", {}).get("lever_boards", [])
+    ab = resume.get("scout", {}).get("ashby_boards", [])
 
     # All sources are independent — run in parallel
     sources = {
@@ -1447,6 +1538,7 @@ def run_scout(resume: dict) -> int:
         "google_careers":  lambda: _scrape_google(resume),
         "greenhouse":      lambda: _scrape_greenhouse(gh) if gh else [],
         "lever":           lambda: _scrape_lever(lv) if lv else [],
+        "ashby":           lambda: _scrape_ashby(ab),
         "yc":              lambda: _scrape_yc_jobs(resume.get("target_roles", [])),
         "hn_hiring":       lambda: _scrape_hn_hiring(resume.get("technical_skills", ["python"])),
         "wellfound":       lambda: _scrape_wellfound(resume.get("target_roles", [])),

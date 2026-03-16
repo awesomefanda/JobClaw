@@ -191,6 +191,7 @@ def load_resume() -> dict:
                         "max_results": 100,    # per platform per search term
                         "greenhouse_boards": [],
                         "lever_boards": [],
+                        "ashby_boards": [],    # add company slugs e.g. ["linear", "vercel"]
                         "hiring_post_keywords": data.get("target_keywords", data.get("target_roles", [])),
                     })
                     PARSED_RESUME.write_text(json.dumps(data, indent=2))
