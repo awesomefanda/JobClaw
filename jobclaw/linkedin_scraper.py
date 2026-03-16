@@ -2,6 +2,13 @@
 
 Requires data/linkedin_session.json (created by running test_linkedin.py once).
 Returns: {company_lower: [{"poster", "company", "snippet", "url"}]}
+
+Rate-limiting design (to avoid account suspension):
+  - Max 6 queries per session (configurable)
+  - 8-15s random pause between searches
+  - Variable scroll depth and speed (human-like)
+  - Brief "rest" pause mid-session
+  - Randomized viewport size per run
 """
 import re
 import time
@@ -15,11 +22,16 @@ log = get_logger("linkedin_scraper")
 DATA = Path(__file__).resolve().parent.parent / "data"
 SESSION_FILE = DATA / "linkedin_session.json"
 
+# Max searches per run — keep low to stay under LinkedIn's radar
+MAX_QUERIES = 6
+
 _STEALTH_JS = """
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3]});
+Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
 Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
-window.chrome = {runtime: {}};
+Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+window.chrome = {runtime: {}, loadTimes: function(){}, csi: function(){}, app: {}};
 """
 
 _ENG_KEYWORDS = [
@@ -28,6 +40,19 @@ _ENG_KEYWORDS = [
     "fullstack", "full stack", "frontend", "distributed systems", "ml engineer",
     "machine learning", "devops", "site reliability", "sre",
 ]
+
+
+def _human_scroll(page) -> None:
+    """Scroll like a human — variable speed, variable depth, occasional pause."""
+    scrolls = random.randint(3, 6)
+    for _ in range(scrolls):
+        distance = random.randint(400, 1100)
+        page.evaluate(f"window.scrollBy(0, {distance})")
+        time.sleep(random.uniform(0.8, 2.8))
+        # Occasionally scroll back up a little (human behavior)
+        if random.random() < 0.2:
+            page.evaluate(f"window.scrollBy(0, -{random.randint(100, 300)})")
+            time.sleep(random.uniform(0.5, 1.2))
 
 
 def _extract_company(text: str) -> str:
@@ -88,10 +113,14 @@ def _search_urls(resume: dict) -> list[str]:
         "#hiring backend",
         "#hiring platform engineer",
         "#hiring infrastructure",
+        "#hiring staff engineer",
     ]
-    for role in resume.get("target_roles", [])[:3]:
+    for role in resume.get("target_roles", [])[:2]:
         queries.append(f"#hiring {role}")
-    return [base.format(kw=quote_plus(q)) for q in queries]
+
+    # Shuffle so repeated runs hit different queries first
+    random.shuffle(queries)
+    return [base.format(kw=quote_plus(q)) for q in queries[:MAX_QUERIES]]
 
 
 def scrape_hiring_posts(resume: dict) -> dict[str, list[dict]]:
@@ -119,7 +148,11 @@ def scrape_hiring_posts(resume: dict) -> dict[str, list[dict]]:
     seen_snippets: set[str] = set()
     total = 0
 
-    log.info(f"LinkedIn scraper: {len(urls)} queries (headless)")
+    # Randomize viewport slightly each run (avoid consistent fingerprint)
+    vp_w = random.randint(1240, 1440)
+    vp_h = random.randint(760, 900)
+
+    log.info(f"LinkedIn scraper: {len(urls)} queries (max {MAX_QUERIES}, headless)")
 
     try:
         with sync_playwright() as p:
@@ -130,16 +163,21 @@ def scrape_hiring_posts(resume: dict) -> dict[str, list[dict]]:
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                 ),
-                viewport={"width": 1280, "height": 800},
+                viewport={"width": vp_w, "height": vp_h},
                 locale="en-US",
+                timezone_id="America/New_York",
             )
             ctx.add_init_script(_STEALTH_JS)
             page = ctx.new_page()
 
+            # Brief pause before first search (simulate opening browser naturally)
+            time.sleep(random.uniform(2, 4))
+
             for i, url in enumerate(urls):
                 try:
                     page.goto(url, timeout=30000)
-                    time.sleep(random.uniform(3, 5))
+                    # Wait for page to settle
+                    time.sleep(random.uniform(3, 6))
 
                     if "login" in page.url or "checkpoint" in page.url:
                         log.warning(
@@ -147,9 +185,7 @@ def scrape_hiring_posts(resume: dict) -> dict[str, list[dict]]:
                         )
                         break
 
-                    for _ in range(4):
-                        page.evaluate("window.scrollBy(0, 900)")
-                        time.sleep(random.uniform(1.2, 2.0))
+                    _human_scroll(page)
 
                     posts = _parse_posts(page.inner_text("body"), extra_kw)
 
@@ -165,7 +201,15 @@ def scrape_hiring_posts(resume: dict) -> dict[str, list[dict]]:
                             pool.setdefault(company.lower(), []).append(post)
 
                     log.info(f"  [{i+1}/{len(urls)}] {added} new engineering posts")
-                    time.sleep(random.uniform(2, 4))
+
+                    # Mid-session rest after 3 queries (simulate reading / distraction)
+                    if i == 2:
+                        rest = random.uniform(15, 30)
+                        log.debug(f"  Mid-session rest: {rest:.0f}s")
+                        time.sleep(rest)
+                    else:
+                        # Normal inter-search pause: 8-15 seconds
+                        time.sleep(random.uniform(8, 15))
 
                 except Exception as e:
                     log.warning(f"  [{i+1}/{len(urls)}] query failed: {e}")
