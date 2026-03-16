@@ -585,44 +585,71 @@ def _is_us_location(loc: str) -> bool:
 
 
 def _location_filter(jobs: list[dict], resume: dict) -> list[dict]:
-    """Keep only jobs in the user's country (or remote / blank location).
+    """Filter jobs by location based on resume preferences.
 
-    When user is US-based:
-      KEEP  — remote jobs
-      KEEP  — blank location (can't tell)
-      KEEP  — location matches a US state, city, or "United States"
-      REJECT — location is non-empty, non-remote, and doesn't look like US
+    remote=True  (default):
+      KEEP  remote, blank, or any US location
+      REJECT non-US locations
+
+    remote=False (local/on-site preference):
+      KEEP  remote (still valid)
+      KEEP  blank location
+      KEEP  jobs in the user's own city or state
+      REJECT anywhere else (other US cities, foreign countries)
     """
     prefs = resume.get("preferences", {})
     user_country = prefs.get("country", "United States").lower()
-
-    # Only apply strict filtering for US-based users (most common case)
-    # For other countries, fall back to a simpler check
+    wants_remote = prefs.get("remote", True)
     us_mode = "united states" in user_country or user_country in ("us", "usa")
+
+    # Parse user's city and state from resume.location ("San Francisco, CA")
+    user_loc_raw = resume.get("location", "").lower().strip()
+    user_city = ""
+    user_state = ""
+    if user_loc_raw:
+        parts = [p.strip() for p in user_loc_raw.split(",")]
+        user_city = parts[0] if parts else ""
+        user_state = parts[1].strip() if len(parts) > 1 else ""
+
+    def _matches_user_area(loc: str) -> bool:
+        """True if location is in the same city/state as the user."""
+        if user_city and user_city in loc:
+            return True
+        if user_state and user_state in loc:
+            return True
+        return False
 
     kept, removed = [], 0
     for j in jobs:
         loc = j.get("location", "").lower().strip()
         is_remote = str(j.get("is_remote", "")).lower() in ("true", "1", "yes", "remote")
 
-        # Always keep remote
+        # Always keep remote jobs
         if is_remote or "remote" in loc:
             kept.append(j)
             continue
 
-        # No location — keep
+        # No location — keep (can't tell)
         if not loc:
             kept.append(j)
             continue
 
-        if us_mode:
+        if not wants_remote:
+            # Local mode: only keep jobs in the user's own city/state
+            if _matches_user_area(loc):
+                kept.append(j)
+            else:
+                log.debug(f"Location filter (local mode): dropped '{j.get('title')}' @ '{j.get('company')}' — '{j.get('location')}'")
+                removed += 1
+        elif us_mode:
+            # Remote-ok mode, US-based: keep any US location
             if _is_us_location(loc):
                 kept.append(j)
             else:
                 log.debug(f"Location filter: dropped '{j.get('title')}' @ '{j.get('company')}' — '{j.get('location')}'")
                 removed += 1
         else:
-            # Non-US user: keep if user's country tokens appear
+            # Remote-ok, non-US: keep if user's country appears
             country_tokens = set(user_country.split())
             if any(tok in loc for tok in country_tokens):
                 kept.append(j)
@@ -631,7 +658,8 @@ def _location_filter(jobs: list[dict], resume: dict) -> list[dict]:
                 removed += 1
 
     if removed:
-        log.info(f"Location filter removed {removed} jobs outside {prefs.get('country', 'United States')}")
+        mode = "local mode" if not wants_remote else prefs.get("country", "United States")
+        log.info(f"Location filter removed {removed} jobs ({mode})")
     return kept
 
 
