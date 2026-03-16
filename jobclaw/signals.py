@@ -1,7 +1,7 @@
 """Phase 3a — SIGNALS: web intelligence for each scored company.
 
-Sources (all via Google search / public endpoints — zero cost):
-  1. LinkedIn hiring posts (site:linkedin.com/posts "hiring")
+Sources:
+  1. LinkedIn hiring posts (Playwright + saved session — real scraping)
   2. Blind offer evaluations (site:teamblind.com "offer evaluation")
   3. Blind sentiment / red flags (PIP, hire-to-fire, layoffs)
   4. Layoffs.fyi / TrueUp layoff check
@@ -163,187 +163,32 @@ def _extract_company_names(text: str) -> list[str]:
     return [c for c in candidates if c.lower() not in _NOISE_WORDS and len(c) > 2]
 
 
-# ─── 1. LinkedIn Hiring Posts (bulk pool) ─────────────────────
+# ─── 1. LinkedIn Hiring Posts (Playwright pool) ────────────────
 
 _hiring_posts_pool: dict[str, list[dict]] | None = None
-_hiring_profiles_pool: dict[str, list[dict]] | None = None
-
-
-def _build_hiring_posts_pool(hm_titles: list[str], target_roles: list[str]) -> dict[str, list[dict]]:
-    """Search LinkedIn hiring posts by HM title and role — build a company→posts index.
-    ~8-10 searches instead of 4 per company.
-    """
-    log.info("Building hiring posts pool (bulk fetch)...")
-    queries = []
-    for title in hm_titles[:3]:
-        queries += [
-            f'site:linkedin.com/posts "{title}" "hiring" 2026',
-            f'site:linkedin.com/posts "{title}" "join my team" 2026',
-        ]
-    for role in target_roles[:2]:
-        queries.append(f'site:linkedin.com/posts "{role}" "we are hiring" 2026')
-    queries.append('site:linkedin.com/posts "engineering" "hiring" "open role" 2026')
-
-    pool: dict[str, list[dict]] = {}
-    seen_urls: set[str] = set()
-
-    for q in queries[:8]:
-        for r in _search(q, num=5, timelimit='m'):
-            url = r.get("url", "")
-            if url in seen_urls or "linkedin.com" not in url:
-                continue
-            title = r.get("title", "")
-            snippet = r.get("snippet", "")
-            # Reject posts older than _MAX_POST_AGE_MONTHS
-            if not _post_age_ok(title + " " + snippet):
-                continue
-            seen_urls.add(url)
-
-            poster = title.split(" on LinkedIn")[0].strip() if " on LinkedIn" in title else ""
-
-            # Extract "at CompanyName" from text
-            text = title + " " + snippet
-            m = re.search(r'\bat\s+([A-Z][A-Za-z0-9][A-Za-z0-9\s\.\-]{1,30}?)(?:\s*[,!.\n]|$)', text)
-            company_hint = m.group(1).strip() if m else ""
-
-            post = {"poster": poster, "snippet": snippet[:200], "url": url}
-
-            # Index by company hint and by all capitalized names in text
-            names = ([company_hint] if company_hint else []) + _extract_company_names(text)
-            for name in set(names):
-                key = name.lower()
-                if len(key) > 3:
-                    pool.setdefault(key, []).append(post)
-
-    log.info(f"Hiring posts pool: {len(seen_urls)} posts → {len(pool)} company keys")
-    return pool
 
 
 def _hiring_posts(company: str, keywords: list[str]) -> list[dict]:
-    """Look up company in pool; fall back to 1 targeted search on pool miss."""
-    global _hiring_posts_pool
+    """Look up company in the LinkedIn scraper pool."""
     if _hiring_posts_pool is None:
-        # Pool not initialized — do direct search (shouldn't normally happen)
-        return _hiring_posts_direct(company)
-
-    key = company.lower().strip()
-    matches: list[dict] = []
-    seen_urls: set[str] = set()
-    for word in key.split():
-        if len(word) > 3:
-            for post in _hiring_posts_pool.get(word, []):
-                if post["url"] not in seen_urls:
-                    seen_urls.add(post["url"])
-                    matches.append(post)
-
-    # Pool miss — one targeted fallback search (last month only)
-    if not matches:
-        for r in _search(f'site:linkedin.com/posts "{company}" "hiring"', num=3, timelimit='m'):
-            if "linkedin.com" not in r.get("url", "") or r["url"] in seen_urls:
-                continue
-            if not _post_age_ok(r.get("title", "") + " " + r.get("snippet", "")):
-                continue
-            poster = r["title"].split(" on LinkedIn")[0].strip() if " on LinkedIn" in r["title"] else ""
-            matches.append({"poster": poster, "snippet": r["snippet"][:200], "url": r["url"]})
-
-    return matches[:5]
-
-
-def _hiring_posts_direct(company: str) -> list[dict]:
-    """Direct search fallback (used when pool unavailable)."""
-    posts = []
-    seen: set[str] = set()
-    for q in [
-        f'site:linkedin.com/posts "{company}" "hiring"',
-        f'site:linkedin.com/posts "{company}" "join my team"',
-    ]:
-        for r in _search(q, num=3, timelimit='m'):
-            if r["url"] in seen or "linkedin.com" not in r["url"]:
-                continue
-            if not _post_age_ok(r.get("title", "") + " " + r.get("snippet", "")):
-                continue
-            seen.add(r["url"])
-            poster = r["title"].split(" on LinkedIn")[0].strip() if " on LinkedIn" in r["title"] else ""
-            posts.append({"poster": poster, "snippet": r["snippet"][:200], "url": r["url"]})
-    return posts
-
-
-# ─── 1b. LinkedIn Hiring Profiles (people with "Hiring" badge) ───
-
-_hiring_profiles_pool: dict[str, list[dict]] | None = None
-
-
-def _build_hiring_profiles_pool(hm_titles: list[str]) -> dict[str, list[dict]]:
-    """Search site:linkedin.com/in for people with a "Hiring" badge on their profile.
-    These are HMs/recruiters who have the 🔵 Hiring frame on their profile picture
-    and often list their open roles directly on their profile.
-    """
-    log.info("Building hiring profiles pool (LinkedIn /in with Hiring badge)...")
-    queries = []
-    for title in hm_titles[:4]:
-        queries.append(f'site:linkedin.com/in "{title}" "Hiring"')
-        queries.append(f'site:linkedin.com/in "{title}" "Currently hiring" OR "We are hiring"')
-    queries.append('site:linkedin.com/in "Director of Engineering" "Hiring" 2026')
-    queries.append('site:linkedin.com/in "VP Engineering" "Hiring" 2026')
-
-    pool: dict[str, list[dict]] = {}
-    seen_urls: set[str] = set()
-
-    for q in queries[:8]:
-        for r in _search(q, num=5):
-            url = r.get("url", "")
-            if url in seen_urls or "linkedin.com/in/" not in url:
-                continue
-            seen_urls.add(url)
-            title_text = r.get("title", "")
-            snippet = r.get("snippet", "")
-
-            # Extract person name from title like "Jane Smith - Director... | LinkedIn"
-            person = re.sub(r'\s*[-|].*', '', title_text).strip()
-
-            # Extract company from snippet or title
-            text = title_text + " " + snippet
-            m = re.search(r'\bat\s+([A-Z][A-Za-z0-9][A-Za-z0-9\s\.\-]{1,30}?)(?:\s*[,!.\n]|$)', text)
-            company_hint = m.group(1).strip() if m else ""
-
-            profile = {"person": person, "snippet": snippet[:200], "url": url, "company_hint": company_hint}
-
-            names = ([company_hint] if company_hint else []) + _extract_company_names(text)
-            for name in set(names):
-                key = name.lower()
-                if len(key) > 3:
-                    pool.setdefault(key, []).append(profile)
-
-    log.info(f"Hiring profiles pool: {len(seen_urls)} profiles → {len(pool)} company keys")
-    return pool
-
-
-def _hiring_profiles(company: str) -> list[dict]:
-    """Look up company in the profiles pool; return matching HM profiles with Hiring badge."""
-    global _hiring_profiles_pool
-    if _hiring_profiles_pool is None:
         return []
 
     key = company.lower().strip()
     matches: list[dict] = []
-    seen_urls: set[str] = set()
+    seen_snippets: set[str] = set()
     for word in key.split():
         if len(word) > 3:
-            for p in _hiring_profiles_pool.get(word, []):
-                if p["url"] not in seen_urls:
-                    seen_urls.add(p["url"])
-                    matches.append(p)
+            for post in _hiring_posts_pool.get(word, []):
+                if post["snippet"] not in seen_snippets:
+                    seen_snippets.add(post["snippet"])
+                    matches.append(post)
+    # Also check full company key
+    for post in _hiring_posts_pool.get(key, []):
+        if post["snippet"] not in seen_snippets:
+            seen_snippets.add(post["snippet"])
+            matches.append(post)
 
-    # Pool miss — one targeted search
-    if not matches:
-        for r in _search(f'site:linkedin.com/in "{company}" "Hiring"', num=3):
-            if "linkedin.com/in/" not in r.get("url", "") or r["url"] in seen_urls:
-                continue
-            seen_urls.add(r["url"])
-            person = re.sub(r'\s*[-|].*', '', r.get("title", "")).strip()
-            matches.append({"person": person, "snippet": r["snippet"][:200], "url": r["url"], "company_hint": company})
-
-    return matches[:3]
+    return matches[:5]
 
 
 # ─── 2. Blind Offers (bulk pool) ──────────────────────────────
@@ -538,11 +383,6 @@ def _enrich_company(company: str, keywords: list[str]) -> dict:
         signals["hiring_posts"] = []
 
     try:
-        signals["hiring_profiles"] = _hiring_profiles(company)
-    except Exception:
-        signals["hiring_profiles"] = []
-
-    try:
         signals["blind_offers"] = _blind_offers(company)
     except Exception:
         signals["blind_offers"] = []
@@ -618,20 +458,21 @@ def run_signals(resume: dict) -> list[dict]:
     log.info(f"{len(todo)} new companies to enrich, {len(company_cache)} cached")
 
     if todo:
-        # ── Phase A: Bulk pool builds in parallel (4 workers, no interdependencies) ──
-        log.info("Pre-fetching bulk pools in parallel (Blind offers, hiring posts, hiring profiles, layoffs)...")
-        global _blind_offer_pool, _layoffs_pool, _hiring_posts_pool, _hiring_profiles_pool
-        hm_titles = resume.get("hm_titles_above_me", [])
-        target_roles = resume.get("target_roles", [])
-        with ThreadPoolExecutor(max_workers=4) as pool_executor:
-            blind_fut    = pool_executor.submit(_build_blind_offer_pool)
-            layoffs_fut  = pool_executor.submit(_build_layoffs_pool)
-            hiring_fut   = pool_executor.submit(_build_hiring_posts_pool, hm_titles, target_roles)
-            profiles_fut = pool_executor.submit(_build_hiring_profiles_pool, hm_titles)
-            _blind_offer_pool     = blind_fut.result()
-            _layoffs_pool         = layoffs_fut.result()
-            _hiring_posts_pool    = hiring_fut.result()
-            _hiring_profiles_pool = profiles_fut.result()
+        # ── Phase A: Bulk pool builds ──────────────────────────────────────────────
+        global _blind_offer_pool, _layoffs_pool, _hiring_posts_pool
+
+        # LinkedIn scraper runs first (serial — needs Playwright browser)
+        log.info("Scraping LinkedIn hiring posts (Playwright)...")
+        from jobclaw.linkedin_scraper import scrape_hiring_posts
+        _hiring_posts_pool = scrape_hiring_posts(resume)
+
+        # Blind offers + layoffs in parallel
+        log.info("Pre-fetching Blind offers and layoffs pools in parallel...")
+        with ThreadPoolExecutor(max_workers=2) as pool_executor:
+            blind_fut   = pool_executor.submit(_build_blind_offer_pool)
+            layoffs_fut = pool_executor.submit(_build_layoffs_pool)
+            _blind_offer_pool = blind_fut.result()
+            _layoffs_pool     = layoffs_fut.result()
 
         # ── Phase B: Parallel per-company enrichment ──
         cache_lock = threading.Lock()
@@ -670,7 +511,7 @@ def run_signals(resume: dict) -> list[dict]:
     for job in scored:
         company = job.get("company", "")
         job["signals"] = company_cache.get(company, {
-            "hiring_posts": [], "hiring_profiles": [], "blind_offers": [],
+            "hiring_posts": [], "blind_offers": [],
             "blind_sentiment": {"positive": [], "negative": [], "red_flags": False},
             "layoffs": {"had_layoffs": False, "detail": ""},
             "salary": {"base_range": "", "tc_range": "", "source": ""},

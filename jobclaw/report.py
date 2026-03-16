@@ -126,12 +126,9 @@ def generate_report(enriched: list[dict] | None = None) -> str:
         conns = ej.get("my_connections", [])
         conn_text = "\n".join(f"{c['name']} ({c['position']})" for c in conns[:3]) or "—"
 
-        # Hiring posts + hiring profiles (LinkedIn /in with Hiring badge)
+        # Hiring posts (LinkedIn Playwright scraper)
         hp = signals.get("hiring_posts", [])
-        hprof = signals.get("hiring_profiles", [])
-        hp_parts = [f"{p.get('poster','?')}: {p.get('snippet','')[:120]}\n{p.get('url','')}" for p in hp[:2]]
-        for prof in hprof[:2]:
-            hp_parts.append(f"🔵 {prof.get('person','?')} [Hiring badge]: {prof.get('snippet','')[:100]}\n{prof.get('url','')}")
+        hp_parts = [f"{p.get('poster','?')}: {p.get('snippet','')[:120]}\n{p.get('url','')}" for p in hp[:3]]
         hp_text = "\n\n".join(hp_parts) or "—"
 
         # Blind offers
@@ -235,15 +232,6 @@ def generate_report(enriched: list[dict] | None = None) -> str:
                 _cell(ws2, row, col, val)
             ws2.row_dimensions[row].height = 50
             row += 1
-        # Profiles with Hiring badge (site:linkedin.com/in)
-        for prof in sig2.get("hiring_profiles", []):
-            if prof.get("url") in seen_urls:
-                continue
-            seen_urls.add(prof.get("url"))
-            for col, val in enumerate([prof.get("person",""), "🔵 Hiring Profile", ej.get("company",""), prof.get("snippet",""), prof.get("url","")], 1):
-                _cell(ws2, row, col, val)
-            ws2.row_dimensions[row].height = 50
-            row += 1
     ws2.freeze_panes = 'A2'
 
     # ── Sheet 3: Salary Data ───────────────────────────────────
@@ -319,7 +307,7 @@ def generate_report(enriched: list[dict] | None = None) -> str:
             reasons.append("🔥 Top Pick")
         if job.get("fit_score", 0) >= 0.85:
             reasons.append("🎯 Strong Fit")
-        if signals.get("hiring_posts") or signals.get("hiring_profiles"):
+        if signals.get("hiring_posts"):
             reasons.append("📢 Active Hiring")
         if signals.get("funding"):
             reasons.append("💰 Recently Funded")
