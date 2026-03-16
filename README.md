@@ -6,11 +6,15 @@ Drop your resume. Get an Excel report with ranked leads, contacts, salary data, 
 
 ```bash
 pip install -r requirements.txt
-playwright install chromium      # for Google Careers scraping
+playwright install chromium      # for Google Careers + LinkedIn scraping
 cp .env.example .env
 # Recommended: add GEMINI_API_KEY (free at aistudio.google.com) — primary scorer
 # Required fallback: add GROQ_API_KEY (free at console.groq.com)
 cp ~/Downloads/resume.pdf .local/   # personal files live in .local/ (gitignored)
+
+# One-time LinkedIn login (use a burner account — see LinkedIn Setup below)
+python test_linkedin.py          # browser opens → log in → session saved automatically
+
 python run.py                    # → open data/reports/*.xlsx
 ```
 
@@ -50,7 +54,7 @@ All 10 sources run concurrently (5 workers). Total scout time ~same as the slowe
 | 4 | **YC Work at a Startup** | Google fallback | YC-backed startups, founders reachable |
 | 5 | **HN Who's Hiring** | Algolia API + Firebase | Founder posts with **direct emails** extracted |
 | 6 | **Wellfound** | Google (`site:wellfound.com`) | Startup jobs with equity + funding data |
-| 7 | **LinkedIn Hiring Posts** ⭐ | Google (`site:linkedin.com/posts`) | People above your level saying "I'm hiring" — **named contacts** |
+| 7 | **LinkedIn Hiring Posts** ⭐ | Playwright (real scraping, saved session) | People above your level saying "I'm hiring" — **named contacts** |
 | 8 | **Blind Offer Feed** ⭐ | Google (`site:teamblind.com`) | "X vs Y vs Z" posts → companies **confirmed closing** candidates |
 | 9 | **Levels.fyi** | Public job listings | Level-aware roles with salary data attached |
 
@@ -80,13 +84,13 @@ Without GEMINI_API_KEY: starts at step 2.
 ### Phase 3a: SIGNALS (web intelligence, zero cost)
 
 ```
-Step A — bulk pre-fetch (3 parallel workers, done once per run):
-  • Blind offer pool     → scrape recent offer posts, index by company name
-  • Layoffs pool         → scrape layoffs.fyi + tech news, build company set
-  • Hiring posts pool    → search by HM title/role, index by company name
+Step A — bulk pre-fetch (done once per run):
+  • LinkedIn hiring posts → Playwright scrapes #hiring posts (6 searches, ~3 min)
+  • Blind offer pool      → scrape recent offer posts, index by company name
+  • Layoffs pool          → scrape layoffs.fyi + tech news, build company set
 
 Step B — per-company enrichment (3 parallel workers):
-  • LinkedIn hiring posts   pool lookup + 1 fallback search on miss
+  • LinkedIn hiring posts   pool lookup (instant — from Playwright scrape above)
   • Blind offer data        pool lookup (instant, no extra search)
   • Blind sentiment / PIP   2 targeted searches
   • Layoff check            pool lookup (instant)
@@ -218,10 +222,26 @@ cp .env.example .local/.env      # .local/.env takes priority over .env
 
 JobClaw checks `.local/` first, then falls back to the project root.
 
-### 4. Connections (optional)
+### 4. LinkedIn Setup (one-time login)
+
+JobClaw scrapes LinkedIn `#hiring` posts using a real browser session — this is what finds named hiring managers posting "I'm building my team."
+
+**Use a burner LinkedIn account** (strongly recommended):
+- LinkedIn's ToS prohibits scraping. A suspended burner costs nothing; your main account has your professional reputation on it.
+- Create a free LinkedIn account with a different email. Add a profile photo and a few connections to make it look real.
+
+Then log in once from the terminal (run from **cmd.exe**, not Git Bash):
+```
+python test_linkedin.py
+```
+A browser opens → log in with the burner account → the script detects the feed automatically and saves the session to `data/linkedin_session.json`. Close the browser. Done.
+
+The session persists across runs (headless from now on). Re-run `test_linkedin.py` only if you see "LinkedIn session expired" in the logs.
+
+### 5. Connections (optional)
 LinkedIn → Settings → Data Privacy → Get a copy of your data → Connections → save as `.local/connections.csv`
 
-### 5. Run
+### 6. Run
 ```bash
 python run.py                   # Full pipeline
 python run.py --scout-only      # Just find new jobs
@@ -229,7 +249,7 @@ python run.py --score-only      # Just score
 python run.py --report-only     # Regenerate report
 ```
 
-### 6. Continuous (optional)
+### 7. Continuous (optional)
 ```bash
 nohup ./exec_loop.sh > data/loop.log 2>&1 &   # Linux/Mac
 # Windows: Task Scheduler → python run.py hourly
@@ -276,7 +296,7 @@ Review `data/parsed_resume.json` and optionally edit:
 | JobSpy, Greenhouse, Lever, HN API | Free (open source / public) |
 | Levels.fyi (jobs + salary + offers) | Free (public endpoints) |
 | Google Search, Blind | Free |
-| Playwright (Google Careers) | Free (open source) |
+| Playwright (Google Careers + LinkedIn scraping) | Free (open source) |
 
 ## Resilience
 
