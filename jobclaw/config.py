@@ -253,8 +253,12 @@ def find_connections_at(company: str, index: dict) -> list[dict]:
     if not index:
         return []
     cl = company.lower().strip()
+    if len(cl) < 3:
+        return []
     matches = []
     for key, conns in index.items():
+        if len(key) < 3:  # skip malformed/blank company keys (e.g. ".", "a")
+            continue
         if cl in key or key in cl:
             matches.extend(conns)
     return matches

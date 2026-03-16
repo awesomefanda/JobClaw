@@ -492,9 +492,15 @@ def _levels_salary(company: str) -> dict:
 
 def _funding_signal(company: str) -> str:
     results = _search(f'"{company}" funding round raised series 2024 2025 2026', num=3)
+    co = company.lower()
     for r in results:
-        if any(kw in r.get("snippet", "").lower() for kw in ["series", "raised", "funding", "valuation", "seed"]):
-            return r["snippet"][:200]
+        snippet = r.get("snippet", "")
+        title = r.get("title", "")
+        # Require company name to appear in the result — avoids cross-company contamination
+        if company.lower() not in (snippet + title).lower():
+            continue
+        if any(kw in snippet.lower() for kw in ["series", "raised", "funding", "valuation", "seed"]):
+            return snippet[:200]
     return ""
 
 
