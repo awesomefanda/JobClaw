@@ -536,64 +536,99 @@ def _keyword_filter(jobs: list[dict], exclude: list[str]) -> list[dict]:
     return filtered
 
 
-# Known non-US country tokens — used to reject jobs with explicit foreign locations
-_FOREIGN_COUNTRY_TOKENS = [
-    "india", "canada", "united kingdom", "uk", "germany", "france", "australia",
-    "singapore", "netherlands", "ireland", "poland", "brazil", "mexico", "spain",
-    "sweden", "denmark", "norway", "finland", "switzerland", "austria", "belgium",
-    "japan", "china", "south korea", "israel", "new zealand", "portugal", "italy",
-    "czechia", "czech republic", "hungary", "romania", "ukraine", "argentina",
-    "colombia", "chile", "malaysia", "indonesia", "philippines", "vietnam",
-    # City-level hints that are unambiguously non-US
-    "bangalore", "hyderabad", "mumbai", "delhi", "pune", "chennai", "noida",
-    "toronto", "vancouver", "montreal", "london", "amsterdam", "berlin", "paris",
-    "sydney", "melbourne", "dublin", "warsaw", "krakow", "tel aviv", "tokyo",
-    "beijing", "shanghai", "seoul", "singapore city",
-]
+# US state names and abbreviations for positive US location matching
+_US_STATES = {
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+    "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+    "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine",
+    "maryland", "massachusetts", "michigan", "minnesota", "mississippi",
+    "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey",
+    "new mexico", "new york", "north carolina", "north dakota", "ohio",
+    "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina",
+    "south dakota", "tennessee", "texas", "utah", "vermont", "virginia",
+    "washington", "west virginia", "wisconsin", "wyoming", "district of columbia",
+    # Abbreviations
+    "al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga", "hi", "id",
+    "il", "in", "ia", "ks", "ky", "la", "me", "md", "ma", "mi", "mn", "ms",
+    "mo", "mt", "ne", "nv", "nh", "nj", "nm", "ny", "nc", "nd", "oh", "ok",
+    "or", "pa", "ri", "sc", "sd", "tn", "tx", "ut", "vt", "va", "wa", "wv",
+    "wi", "wy", "dc",
+}
+
+# Well-known US cities that appear without a state code in some listings
+_US_CITIES = {
+    "san francisco", "new york", "los angeles", "seattle", "boston", "chicago",
+    "austin", "denver", "atlanta", "miami", "dallas", "houston", "portland",
+    "san jose", "san diego", "minneapolis", "philadelphia", "phoenix", "detroit",
+    "nashville", "salt lake city", "raleigh", "charlotte", "pittsburgh",
+    "st. louis", "baltimore", "washington", "new york city", "nyc", "sf", "bay area",
+    "silicon valley", "research triangle",
+}
+
+
+def _is_us_location(loc: str) -> bool:
+    """Return True if location string looks like a US location."""
+    loc = loc.lower()
+    if any(x in loc for x in ("united states", "usa", "u.s.a", "u.s.", ", us")):
+        return True
+    # Check for ", ST" pattern (e.g. "Seattle, WA")
+    import re as _re
+    m = _re.findall(r',\s*([a-z]{2})\b', loc)
+    if any(abbr in _US_STATES for abbr in m):
+        return True
+    # Check full state names and well-known US cities
+    if any(s in loc for s in _US_STATES):
+        return True
+    if any(c in loc for c in _US_CITIES):
+        return True
+    return False
 
 
 def _location_filter(jobs: list[dict], resume: dict) -> list[dict]:
-    """Remove jobs explicitly located in a foreign country.
+    """Keep only jobs in the user's country (or remote / blank location).
 
-    Passes through:
-      - Remote jobs (is_remote=True or "remote" in location)
-      - Jobs with no location (can't tell — let scorer decide)
-      - Jobs where the user's country appears in the location
-    Removes:
-      - Jobs whose location contains a known foreign country/city token
-        and does NOT contain the user's country.
+    When user is US-based:
+      KEEP  — remote jobs
+      KEEP  — blank location (can't tell)
+      KEEP  — location matches a US state, city, or "United States"
+      REJECT — location is non-empty, non-remote, and doesn't look like US
     """
     prefs = resume.get("preferences", {})
     user_country = prefs.get("country", "United States").lower()
-    country_tokens = set(user_country.split())  # {"united", "states"}
+
+    # Only apply strict filtering for US-based users (most common case)
+    # For other countries, fall back to a simpler check
+    us_mode = "united states" in user_country or user_country in ("us", "usa")
 
     kept, removed = [], 0
     for j in jobs:
         loc = j.get("location", "").lower().strip()
         is_remote = str(j.get("is_remote", "")).lower() in ("true", "1", "yes", "remote")
 
-        # Always keep remote jobs
+        # Always keep remote
         if is_remote or "remote" in loc:
             kept.append(j)
             continue
 
-        # No location info — keep (scorer will handle it)
+        # No location — keep
         if not loc:
             kept.append(j)
             continue
 
-        # Keep if user's country is mentioned
-        if any(tok in loc for tok in country_tokens):
-            kept.append(j)
-            continue
-
-        # Reject if a known foreign token appears
-        if any(foreign in loc for foreign in _FOREIGN_COUNTRY_TOKENS):
-            log.debug(f"Location filter: dropped '{j.get('title')}' @ '{j.get('company')}' — location '{j.get('location')}'")
-            removed += 1
-            continue
-
-        kept.append(j)
+        if us_mode:
+            if _is_us_location(loc):
+                kept.append(j)
+            else:
+                log.debug(f"Location filter: dropped '{j.get('title')}' @ '{j.get('company')}' — '{j.get('location')}'")
+                removed += 1
+        else:
+            # Non-US user: keep if user's country tokens appear
+            country_tokens = set(user_country.split())
+            if any(tok in loc for tok in country_tokens):
+                kept.append(j)
+            else:
+                log.debug(f"Location filter: dropped '{j.get('title')}' @ '{j.get('company')}' — '{j.get('location')}'")
+                removed += 1
 
     if removed:
         log.info(f"Location filter removed {removed} jobs outside {prefs.get('country', 'United States')}")
