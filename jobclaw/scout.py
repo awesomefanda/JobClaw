@@ -536,6 +536,70 @@ def _keyword_filter(jobs: list[dict], exclude: list[str]) -> list[dict]:
     return filtered
 
 
+# Known non-US country tokens — used to reject jobs with explicit foreign locations
+_FOREIGN_COUNTRY_TOKENS = [
+    "india", "canada", "united kingdom", "uk", "germany", "france", "australia",
+    "singapore", "netherlands", "ireland", "poland", "brazil", "mexico", "spain",
+    "sweden", "denmark", "norway", "finland", "switzerland", "austria", "belgium",
+    "japan", "china", "south korea", "israel", "new zealand", "portugal", "italy",
+    "czechia", "czech republic", "hungary", "romania", "ukraine", "argentina",
+    "colombia", "chile", "malaysia", "indonesia", "philippines", "vietnam",
+    # City-level hints that are unambiguously non-US
+    "bangalore", "hyderabad", "mumbai", "delhi", "pune", "chennai", "noida",
+    "toronto", "vancouver", "montreal", "london", "amsterdam", "berlin", "paris",
+    "sydney", "melbourne", "dublin", "warsaw", "krakow", "tel aviv", "tokyo",
+    "beijing", "shanghai", "seoul", "singapore city",
+]
+
+
+def _location_filter(jobs: list[dict], resume: dict) -> list[dict]:
+    """Remove jobs explicitly located in a foreign country.
+
+    Passes through:
+      - Remote jobs (is_remote=True or "remote" in location)
+      - Jobs with no location (can't tell — let scorer decide)
+      - Jobs where the user's country appears in the location
+    Removes:
+      - Jobs whose location contains a known foreign country/city token
+        and does NOT contain the user's country.
+    """
+    prefs = resume.get("preferences", {})
+    user_country = prefs.get("country", "United States").lower()
+    country_tokens = set(user_country.split())  # {"united", "states"}
+
+    kept, removed = [], 0
+    for j in jobs:
+        loc = j.get("location", "").lower().strip()
+        is_remote = str(j.get("is_remote", "")).lower() in ("true", "1", "yes", "remote")
+
+        # Always keep remote jobs
+        if is_remote or "remote" in loc:
+            kept.append(j)
+            continue
+
+        # No location info — keep (scorer will handle it)
+        if not loc:
+            kept.append(j)
+            continue
+
+        # Keep if user's country is mentioned
+        if any(tok in loc for tok in country_tokens):
+            kept.append(j)
+            continue
+
+        # Reject if a known foreign token appears
+        if any(foreign in loc for foreign in _FOREIGN_COUNTRY_TOKENS):
+            log.debug(f"Location filter: dropped '{j.get('title')}' @ '{j.get('company')}' — location '{j.get('location')}'")
+            removed += 1
+            continue
+
+        kept.append(j)
+
+    if removed:
+        log.info(f"Location filter removed {removed} jobs outside {prefs.get('country', 'United States')}")
+    return kept
+
+
 # ─── Source 7: Proactive LinkedIn Hiring Post Leads ────────────
 
 def _scrape_linkedin_hiring_posts(resume: dict) -> list[dict]:
@@ -1272,22 +1336,6 @@ def _scrape_teamblind_jobs(resume: dict) -> list[dict]:
                     or any(h.lower() == "remote" for h in highlights)
                 )
 
-                # Skip non-remote jobs outside the user's country
-                user_country = prefs.get("country", "United States").lower()
-                if not is_remote_job and location:
-                    loc_lower = location.lower()
-                    # Accept if user's country keyword appears in location
-                    # Reject if location looks like a different country
-                    country_match = any(w in loc_lower for w in user_country.split())
-                    # Common non-US indicators when user is US-based
-                    foreign_indicators = ["india", "canada", "uk", "united kingdom",
-                                          "germany", "france", "australia", "singapore",
-                                          "netherlands", "ireland", "poland", "brazil"]
-                    is_foreign = any(fi in loc_lower for fi in foreign_indicators)
-                    if is_foreign and not country_match:
-                        log.debug(f"TeamBlind: skipping {title} @ {company} — location '{location}' outside {user_country}")
-                        continue
-
                 jobs.append({
                     "id": _id(company, title, location) if not job_id else f"tblind_{job_id}",
                     "title": title,
@@ -1375,9 +1423,10 @@ def run_scout(resume: dict) -> int:
     log.info(f"After dedup: {len(new_jobs)} jobs total, {levels_jobs_kept} levels.fyi jobs")
 
     new_jobs = _keyword_filter(new_jobs, resume.get("keywords_exclude", []))
-    
+    new_jobs = _location_filter(new_jobs, resume)
+
     levels_jobs_after_filter = sum(1 for j in new_jobs if j.get("source") == "levels_fyi_jobs")
-    log.info(f"After keyword filter: {len(new_jobs)} jobs total, {levels_jobs_after_filter} levels.fyi jobs")
+    log.info(f"After keyword+location filter: {len(new_jobs)} jobs total, {levels_jobs_after_filter} levels.fyi jobs")
 
     # Append to CSV
     file_exists = JOBS_CSV.exists()
