@@ -242,8 +242,10 @@ def _blind_offers(company: str) -> list[str]:
 # ─── 3. Blind Sentiment ───────────────────────────────────────
 
 def _blind_sentiment(company: str) -> dict:
-    pos = _search(f'site:teamblind.com "{company}" "good WLB" OR "great culture" OR "recommend" 2025 2026', num=3)
-    neg = _search(f'site:teamblind.com "{company}" "PIP" OR "hire to fire" OR "toxic" OR "layoffs" 2025 2026', num=3)
+    pos = [r for r in _search(f'site:teamblind.com "{company}" "good WLB" OR "great culture" OR "recommend" 2025 2026', num=3)
+           if "teamblind.com" in r.get("url", "")]
+    neg = [r for r in _search(f'site:teamblind.com "{company}" "PIP" OR "hire to fire" OR "toxic" OR "layoffs" 2025 2026', num=3)
+           if "teamblind.com" in r.get("url", "")]
     return {
         "positive": [r["snippet"][:150] for r in pos[:2]],
         "negative": [r["snippet"][:150] for r in neg[:2]],

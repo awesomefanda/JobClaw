@@ -13,6 +13,7 @@ Rate-limiting design (to avoid account suspension):
 import re
 import time
 import random
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote_plus
 from jobclaw.logger import get_logger
@@ -24,6 +25,40 @@ SESSION_FILE = DATA / "linkedin_session.json"
 
 # Max searches per run — keep low to stay under LinkedIn's radar
 MAX_QUERIES = 6
+
+# Reject posts older than this many days
+MAX_POST_AGE_DAYS = 60
+
+
+def _post_age_ok(url: str, post_text: str) -> bool:
+    """Return False if the post is too old.
+
+    Two checks:
+    1. Decode timestamp from LinkedIn activity ID in URL (most reliable).
+       LinkedIn activity IDs encode Unix ms timestamp: id >> 22 ≈ seconds since epoch.
+    2. Parse relative age text from post body ("1yr", "3mo", etc.) as fallback.
+    """
+    now_ts = datetime.now(timezone.utc).timestamp()
+    cutoff = now_ts - MAX_POST_AGE_DAYS * 86400
+
+    # Check 1: activity ID in URL
+    m = re.search(r'activity-(\d{15,20})', url)
+    if m:
+        activity_id = int(m.group(1))
+        post_ts = activity_id >> 22  # approx Unix seconds
+        if post_ts < cutoff:
+            return False
+        return True  # URL check passed — trust it over text parsing
+
+    # Check 2: relative time in post text (e.g. "9h", "2d", "3w", "1mo", "2yr")
+    tl = post_text[:200].lower()
+    if re.search(r'\b\d+\s*yr\b|\b\d+\s*year', tl):
+        return False
+    m = re.search(r'\b(\d+)\s*mo\b', tl)
+    if m and int(m.group(1)) > 2:
+        return False
+
+    return True
 
 _STEALTH_JS = """
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
@@ -88,6 +123,10 @@ def _parse_posts(raw_text: str, extra_keywords: list[str]) -> list[dict]:
         if not urls:
             urls = re.findall(r'https://www\.linkedin\.com/feed/update/[^\s\n?]+', block)
         url = urls[0] if urls else ""
+
+        # Reject old posts using activity ID timestamp or relative age text
+        if not _post_age_ok(url, block[:200]):
+            continue
 
         company = _extract_company(block[:400])
 
@@ -224,4 +263,12 @@ def scrape_hiring_posts(resume: dict) -> dict[str, list[dict]]:
         return {}
 
     log.info(f"LinkedIn scraper done: {total} posts → {len(pool)} company keys")
+
+    # Write cache so scout.py can create leads from these posts on next run
+    if pool:
+        import json as _json
+        cache_file = DATA / "linkedin_posts.json"
+        cache_file.write_text(_json.dumps(pool, indent=2))
+        log.debug(f"LinkedIn posts cache written: {cache_file}")
+
     return pool

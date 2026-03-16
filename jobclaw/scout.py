@@ -539,116 +539,66 @@ def _keyword_filter(jobs: list[dict], exclude: list[str]) -> list[dict]:
 # ─── Source 7: Proactive LinkedIn Hiring Post Leads ────────────
 
 def _scrape_linkedin_hiring_posts(resume: dict) -> list[dict]:
-    """Find LinkedIn posts from hiring managers PROACTIVELY.
+    """Convert LinkedIn hiring posts from the Playwright scraper cache into job leads.
 
-    Key insight: a Director posting "I'm hiring" is a lead for Staff/Principal
-    roles even if no job listing exists. We search by the titles of people who
-    HIRE at the user's level, not the user's own title.
+    Reads data/linkedin_posts.json (written by signals phase or a prior run).
+    Returns empty list if no cache exists yet — signals phase will populate it.
     """
-    jobs = []
+    from pathlib import Path as _Path
+    cache_file = _Path(__file__).resolve().parent.parent / "data" / "linkedin_posts.json"
+    if not cache_file.exists():
+        log.debug("LinkedIn posts cache not found — will be populated during signals phase")
+        return []
+
+    import json as _json
+    try:
+        pool: dict = _json.loads(cache_file.read_text())
+    except Exception as e:
+        log.warning(f"LinkedIn posts cache read error: {e}")
+        return []
+
+    target_roles = resume.get("target_roles", [])
     now = datetime.now().isoformat()
+    jobs = []
     seen_urls: set[str] = set()
 
-    # Get hiring manager titles from resume (Groq inferred these)
-    hm_titles = resume.get("hm_titles_above_me", [])
-    target_kw = resume.get("target_keywords", resume.get("target_roles", []))
-    target_roles = resume.get("target_roles", [])
+    for company, posts in pool.items():
+        for post in posts:
+            url = post.get("url", "")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            poster = post.get("poster", "")
+            snippet = post.get("snippet", "")
+            if not poster or not company:
+                continue
 
-    # Build queries — search for people above your level saying "hiring"
-    queries = []
+            inferred_title = f"Hiring post by {poster}"
+            for role in target_roles:
+                if role.lower() in snippet.lower():
+                    inferred_title = role
+                    break
 
-    # Queries based on who hires you (most valuable)
-    for hm in hm_titles[:3]:
-        queries.append(f'site:linkedin.com/posts "{hm}" "hiring" 2026')
-        queries.append(f'site:linkedin.com/posts "{hm}" "building my team" 2026')
-
-    # Queries based on your target roles
-    for kw in target_kw[:4]:
-        queries.append(f'site:linkedin.com/posts "hiring" "{kw}" 2026')
-        queries.append(f'site:linkedin.com/posts "open role" "{kw}"')
-
-    # Generic high-signal phrases
-    for role in target_roles[:2]:
-        queries.append(f'site:linkedin.com/posts "join my team" "{role}"')
-        queries.append(f'site:linkedin.com/posts "DM me" "{role}" hiring')
-        queries.append(f'site:linkedin.com/posts "looking for" "{role}"')
-
-    log.info(f"LinkedIn hiring posts: searching {len(queries)} queries")
-
-    for q in queries:
-        try:
-            results = _search(q, num=5)
-            for r in results:
-                url = r.get("url", "")
-                if url in seen_urls or "linkedin.com" not in url:
-                    continue
-                seen_urls.add(url)
-
-                title_raw = r.get("title", "")
-                snippet = r.get("snippet", "")
-
-                # Extract poster name
-                poster = ""
-                if " on LinkedIn" in title_raw:
-                    poster = title_raw.split(" on LinkedIn")[0].strip()
-                elif " - " in title_raw:
-                    poster = title_raw.split(" - ")[0].strip()
-
-                # Extract company from title/snippet
-                company = ""
-                for marker in ["@", " at ", "| "]:
-                    if marker in title_raw:
-                        parts = title_raw.split(marker)
-                        if len(parts) > 1:
-                            company = parts[-1].split("-")[0].split("|")[0].split(",")[0].strip()
-                            break
-                if not company:
-                    # Try snippet
-                    for marker in ["@", " at "]:
-                        if marker in snippet:
-                            parts = snippet.split(marker)
-                            if len(parts) > 1:
-                                company = parts[1].split(".")[0].split(",")[0].split(" ")[0].strip()
-                                break
-
-                if not poster or not company:
-                    continue
-
-                # This is a FIRST-CLASS LEAD — the poster is the contact
-                inferred_title = f"Hiring post by {poster}"
-                for role in target_roles:
-                    if role.lower() in (title_raw + snippet).lower():
-                        inferred_title = role
-                        break
-
-                jobs.append({
-                    "id": _id(company, inferred_title, "hiring_post"),
-                    "title": inferred_title,
-                    "company": company,
-                    "location": "", "is_remote": "",
-                    "job_url": url,
-                    "salary_min": "", "salary_max": "", "job_type": "",
-                    "description": f"HIRING POST by {poster}: {snippet}",
-                    "date_posted": "",
-                    "source": "linkedin_hiring_post",
-                    "founder_email": "",
-                    "scraped_at": now,
-                    # Extra fields for this source
-                    "_poster_name": poster,
-                    "_poster_headline": "",
-                    "_post_url": url,
-                    "_post_snippet": snippet,
-                })
-
-            time.sleep(1.5)  # Be polite to Google
-        except Exception as e:
-            log.debug(f"Hiring post query failed: {e}")
-            continue
+            jobs.append({
+                "id": _id(company, inferred_title, "hiring_post"),
+                "title": inferred_title,
+                "company": company.title(),
+                "location": "", "is_remote": "",
+                "job_url": url,
+                "salary_min": "", "salary_max": "", "job_type": "",
+                "description": f"HIRING POST by {poster}: {snippet}",
+                "date_posted": "",
+                "source": "linkedin_hiring_post",
+                "founder_email": "",
+                "scraped_at": now,
+                "_poster_name": poster,
+                "_poster_headline": "",
+                "_post_url": url,
+                "_post_snippet": snippet,
+            })
 
     if jobs:
-        log.info(f"LinkedIn hiring posts: {len(jobs)} leads from {len(seen_urls)} unique posts")
-    else:
-        log.debug("LinkedIn hiring posts: no leads found")
+        log.info(f"LinkedIn hiring posts: {len(jobs)} leads from cache")
     return jobs
 
 
