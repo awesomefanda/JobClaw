@@ -1272,6 +1272,22 @@ def _scrape_teamblind_jobs(resume: dict) -> list[dict]:
                     or any(h.lower() == "remote" for h in highlights)
                 )
 
+                # Skip non-remote jobs outside the user's country
+                user_country = prefs.get("country", "United States").lower()
+                if not is_remote_job and location:
+                    loc_lower = location.lower()
+                    # Accept if user's country keyword appears in location
+                    # Reject if location looks like a different country
+                    country_match = any(w in loc_lower for w in user_country.split())
+                    # Common non-US indicators when user is US-based
+                    foreign_indicators = ["india", "canada", "uk", "united kingdom",
+                                          "germany", "france", "australia", "singapore",
+                                          "netherlands", "ireland", "poland", "brazil"]
+                    is_foreign = any(fi in loc_lower for fi in foreign_indicators)
+                    if is_foreign and not country_match:
+                        log.debug(f"TeamBlind: skipping {title} @ {company} — location '{location}' outside {user_country}")
+                        continue
+
                 jobs.append({
                     "id": _id(company, title, location) if not job_id else f"tblind_{job_id}",
                     "title": title,

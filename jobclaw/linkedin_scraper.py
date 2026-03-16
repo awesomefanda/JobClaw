@@ -76,6 +76,14 @@ _ENG_KEYWORDS = [
     "machine learning", "devops", "site reliability", "sre",
 ]
 
+# Must also appear in the post for it to be a hiring signal
+_HIRING_INTENT = [
+    "hiring", "open role", "open position", "we're looking", "we are looking",
+    "join my team", "join our team", "dm me", "reach out", "apply",
+    "looking for a", "looking for an", "building my team", "building our team",
+    "i'm looking", "we're hiring", "currently hiring", "accepting applications",
+]
+
 
 def _human_scroll(page) -> None:
     """Scroll like a human — variable speed, variable depth, occasional pause."""
@@ -107,7 +115,10 @@ def _parse_posts(raw_text: str, extra_keywords: list[str]) -> list[dict]:
 
     for block in blocks[1:]:
         tl = block.lower()
+        # Must contain an engineering keyword AND a hiring intent phrase
         if not any(kw in tl for kw in all_kw):
+            continue
+        if not any(intent in tl for intent in _HIRING_INTENT):
             continue
 
         snippet = block[:500].strip()
