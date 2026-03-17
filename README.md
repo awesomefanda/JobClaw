@@ -144,7 +144,7 @@ Track B (cold): no warm path — tailored resume required
 
 ### Phase 5: EXCEL REPORT
 
-5 sheets: **Job Matches** (ranked) · **Hiring Posts** · **Salary Data** · **Pipeline Tracker** · **🔔 Alerts**
+6 sheets: **Job Matches** (ranked) · **Hiring Posts** · **Salary Data** · **Pipeline Tracker** · **🔔 Alerts** · **🌐 Remote Jobs**
 
 The **Alerts** tab surfaces only the jobs worth acting on immediately — high action score, active hiring signal, recent funding, or a warm connection — sorted by urgency.
 

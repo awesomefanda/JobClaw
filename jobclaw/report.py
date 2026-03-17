@@ -1,10 +1,12 @@
 """Phase 5 — REPORT: Generate the final Excel output.
 
-Reads data/enriched.json and produces a single .xlsx with 4 sheets:
-  1. Job Matches (ranked by action_score, all data in one row)
-  2. Hiring Posts (LinkedIn "I'm hiring" feed)
-  3. Salary Data (Levels.fyi + Blind per company)
-  4. Pipeline (tracker for user to update as they progress)
+Reads data/enriched.json and produces a single .xlsx with 6 sheets:
+  1. Job Matches    (ranked by action_score, all data in one row)
+  2. Hiring Posts   (LinkedIn "I'm hiring" feed)
+  3. Salary Data    (Levels.fyi + Blind per company)
+  4. Pipeline       (tracker for user to update as they progress)
+  5. 🔔 Alerts      (high action_score / strong signals — act on these first)
+  6. 🌐 Remote Jobs (all remote-friendly positions sorted by fit)
 """
 import json
 from datetime import datetime
@@ -364,6 +366,55 @@ def generate_report(enriched: list[dict] | None = None) -> str:
 
     ws5.freeze_panes = 'C2'
     log.info(f"   Alerts: {len(alerts)} jobs flagged")
+
+    # ── Sheet 6: Remote Jobs ───────────────────────────────────
+    ws6 = wb.create_sheet("🌐 Remote Jobs")
+    _header_row(ws6,
+        ["#", "Company", "Title", "Fit\nScore", "Action\nScore", "Salary", "Source", "Apply URL"],
+        [5, 18, 32, 7, 8, 18, 10, 40])
+
+    REMOTE_FILL = PatternFill('solid', fgColor='E3F2FD')   # light blue
+
+    remote_jobs = [
+        j for j in enriched
+        if str(j.get("is_remote", "")).lower() in ("true", "1", "yes")
+        or "remote" in j.get("location", "").lower()
+    ]
+    remote_jobs.sort(key=lambda x: x.get("action_score", 0), reverse=True)
+
+    for idx, j in enumerate(remote_jobs):
+        row = idx + 2
+        sig = j.get("signals", {})
+        sal = sig.get("salary", {})
+        sal_text = sal.get("tc_range", "") or sal.get("base_range", "")
+        if not sal_text:
+            sm, sx = j.get("salary_min", ""), j.get("salary_max", "")
+            if sm and sx:
+                sal_text = f"${sm} – ${sx}"
+        sal_text = sal_text or "—"
+
+        values = [
+            idx + 1,
+            j.get("company", ""),
+            j.get("title", ""),
+            j.get("fit_score", 0),
+            j.get("action_score", 0),
+            sal_text,
+            j.get("source", ""),
+            j.get("job_url", ""),
+        ]
+        for col, val in enumerate(values, 1):
+            font = BOLD if col in (2, 3) else BODY
+            if col == 4:
+                font = HI_FONT if j.get("fit_score", 0) >= 0.85 else MID_FONT
+            elif col == 5:
+                font = HI_FONT if j.get("action_score", 0) >= 1.0 else MID_FONT
+            _cell(ws6, row, col, val, font=font, fill=REMOTE_FILL)
+        ws6.row_dimensions[row].height = 40
+
+    ws6.freeze_panes = 'C2'
+    ws6.auto_filter.ref = f"A1:H{len(remote_jobs)+1}"
+    log.info(f"   Remote jobs: {len(remote_jobs)} positions")
 
     # ── Save ───────────────────────────────────────────────────
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
