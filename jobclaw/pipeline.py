@@ -42,6 +42,19 @@ def run(resume_override: dict | None = None):
     log.info(f"Min fit score: {config.MIN_FIT_SCORE}")
     log.info("")
 
+    # ── Phase 0b: LinkedIn scrape (before scout so cache is ready) ─
+    try:
+        from jobclaw.linkedin_scraper import scrape_hiring_posts, SESSION_FILE
+        if SESSION_FILE.exists():
+            log.info("Phase 0b: Scraping LinkedIn hiring posts (cache for scout + signals)...")
+            scrape_hiring_posts(resume)  # writes data/linkedin_posts.json
+        else:
+            log.info("Phase 0b: No LinkedIn session — skipping (run test_linkedin.py once to enable)")
+    except Exception as e:
+        log.warning(f"Phase 0b (LinkedIn pre-scrape) failed: {e}")
+
+    log.info("")
+
     # ── Phase 1: Discover ──────────────────────────────────────
     new_count = 0
     try:

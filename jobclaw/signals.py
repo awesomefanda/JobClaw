@@ -48,7 +48,7 @@ _S.headers.update({
 _search_sem = threading.Semaphore(2)
 _search_lock = threading.Lock()
 _last_search_at: float = 0.0
-_SEARCH_INTERVAL = 0.5  # seconds between any two searches
+_SEARCH_INTERVAL = 1.5  # seconds between any two searches — 0.5s caused DDG throttling
 
 
 def _ddg(query: str, num: int = 5, timelimit: str | None = None) -> list[dict]:
@@ -463,10 +463,17 @@ def run_signals(resume: dict) -> list[dict]:
         # ── Phase A: Bulk pool builds ──────────────────────────────────────────────
         global _blind_offer_pool, _layoffs_pool, _hiring_posts_pool
 
-        # LinkedIn scraper runs first (serial — needs Playwright browser)
-        log.info("Scraping LinkedIn hiring posts (Playwright)...")
-        from jobclaw.linkedin_scraper import scrape_hiring_posts
-        _hiring_posts_pool = scrape_hiring_posts(resume)
+        # LinkedIn posts — use cache written by Phase 0b if available,
+        # otherwise scrape now (fallback for --signals-only runs)
+        from jobclaw.linkedin_scraper import scrape_hiring_posts, DATA as _LI_DATA
+        _li_cache = _LI_DATA / "linkedin_posts.json"
+        if _li_cache.exists():
+            import json as _json
+            _hiring_posts_pool = _json.loads(_li_cache.read_text())
+            log.info(f"LinkedIn posts: loaded from cache ({len(_hiring_posts_pool)} companies)")
+        else:
+            log.info("LinkedIn posts: cache not found — scraping now...")
+            _hiring_posts_pool = scrape_hiring_posts(resume)
 
         # Blind offers + layoffs in parallel
         log.info("Pre-fetching Blind offers and layoffs pools in parallel...")
@@ -486,9 +493,9 @@ def run_signals(resume: dict) -> list[dict]:
                 SIGNALS_CACHE_JSON.write_text(json.dumps(company_cache, indent=2))
             return company, signals
 
-        log.info(f"Enriching {len(todo)} companies (3 parallel workers)...")
+        log.info(f"Enriching {len(todo)} companies (2 parallel workers)...")
         done_count = 0
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             futures = {executor.submit(_enrich_and_cache, c): c for c in todo}
             for future in as_completed(futures):
                 company = futures[future]
