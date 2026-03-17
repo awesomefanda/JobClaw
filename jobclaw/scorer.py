@@ -1,11 +1,15 @@
-"""Phase 2 — SCORE: Groq LLM scores each JD against resume.
+"""Phase 2 — SCORE: LLM scores each JD against resume.
 
 Reads unscored jobs from data/jobs.csv.
 Outputs data/scored.json (only matches >= MIN_FIT_SCORE).
 Tracks scored IDs in data/scored_ids.txt to avoid re-scoring.
 
-Batches all jobs into a minimum number of Groq calls to avoid
-burning through the daily token limit.
+Provider chain (all free):
+  1. Gemini 2.0 Flash       — 1500 req/day via Google AI Studio
+  2. Claude (OAuth)          — reuses ~/.claude/.credentials.json from your
+                               Claude Code subscription ($20/mo) — no extra cost
+  3. Groq llama-3.3-70b     — 100k tokens/day
+  4. Groq llama-3.1-8b      — 500k tokens/day (last resort)
 """
 import csv
 import json
@@ -26,10 +30,13 @@ SCORED_IDS = DATA / "scored_ids.txt"
 # ~5 jobs per batch balances prompt size vs. call count
 BATCH_SIZE = 5
 
-# Fallback model with higher daily token limit (500k TPD vs 100k for 70b)
-GROQ_FALLBACK_MODEL = "llama-3.1-8b-instant"
-# Final fallback: Gemini 2.0 Flash (free via Google AI Studio, 1500 req/day)
-GEMINI_FALLBACK_MODEL = "gemini-2.0-flash"
+GROQ_FALLBACK_MODEL  = "llama-3.1-8b-instant"
+GEMINI_MODEL         = "gemini-2.0-flash"
+CLAUDE_OAUTH_MODEL   = "claude-haiku-4-5-20251001"   # fastest Claude model
+
+_CLAUDE_CREDS_PATH   = Path.home() / ".claude" / ".credentials.json"
+_ANTHROPIC_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+_ANTHROPIC_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 
 def _parse_retry_seconds(error_message: str) -> float:
@@ -40,6 +47,94 @@ def _parse_retry_seconds(error_message: str) -> float:
         seconds = float(m.group(2) or 0)
         return minutes * 60 + seconds
     return 0.0
+
+
+def _load_claude_token() -> str | None:
+    """Read Claude Code OAuth token from ~/.claude/.credentials.json.
+    Auto-refreshes if expiring within 10 minutes.
+    Returns access token string, or None if unavailable.
+    """
+    if not _CLAUDE_CREDS_PATH.exists():
+        return None
+    try:
+        creds = json.loads(_CLAUDE_CREDS_PATH.read_text(encoding="utf-8"))
+        oauth = creds.get("claudeAiOauth", creds)
+        expires_at = oauth.get("expiresAt", 0)
+        if expires_at < 1e12:          # convert seconds → milliseconds if needed
+            expires_at *= 1000
+        remaining_min = (expires_at - time.time() * 1000) / 60000
+
+        if remaining_min < 10:
+            # Refresh the token
+            refresh_token = oauth.get("refreshToken") or oauth.get("refresh_token")
+            if not refresh_token:
+                return None
+            import requests as _req
+            resp = _req.post(
+                _ANTHROPIC_TOKEN_URL,
+                json={"grant_type": "refresh_token",
+                      "client_id": _ANTHROPIC_CLIENT_ID,
+                      "refresh_token": refresh_token},
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                log.debug(f"Claude token refresh failed: {resp.status_code}")
+                return None
+            data = resp.json()
+            oauth["accessToken"] = data["access_token"]
+            if data.get("refresh_token"):
+                oauth["refreshToken"] = data["refresh_token"]
+            oauth["expiresAt"] = int(time.time() * 1000) + data.get("expires_in", 28800) * 1000
+            if "claudeAiOauth" in creds:
+                creds["claudeAiOauth"] = oauth
+            else:
+                creds = oauth
+            _CLAUDE_CREDS_PATH.write_text(json.dumps(creds, indent=2), encoding="utf-8")
+            log.debug("Claude OAuth token refreshed")
+
+        return oauth.get("accessToken") or oauth.get("access_token")
+    except Exception as e:
+        log.debug(f"Claude token load failed: {e}")
+        return None
+
+
+def _try_claude_oauth(prompt: str, job_count: int) -> list[dict | None] | None:
+    """Call Anthropic Messages API using Claude Code OAuth token.
+    Returns None if unavailable, 'RATE_LIMITED' if quota hit, else results.
+    """
+    token = _load_claude_token()
+    if not token:
+        return None   # not available
+
+    import requests as _req
+    try:
+        resp = _req.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "anthropic-version": "2023-06-01",
+            },
+            json={
+                "model": CLAUDE_OAUTH_MODEL,
+                "max_tokens": 700 * job_count,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=60,
+        )
+        if resp.status_code == 429:
+            return "RATE_LIMITED"
+        if resp.status_code != 200:
+            log.debug(f"Claude OAuth API error: {resp.status_code} {resp.text[:200]}")
+            return None
+        text = resp.json()["content"][0]["text"].strip()
+        return _parse_response(text, job_count)
+    except json.JSONDecodeError as e:
+        log.warning(f"Claude OAuth JSON parse error: {e}")
+        return [None] * job_count
+    except Exception as e:
+        log.debug(f"Claude OAuth call failed: {e}")
+        return None
 
 
 def _already_scored() -> set:
@@ -123,7 +218,7 @@ def _try_gemini(prompt: str, job_count: int) -> list[dict | None]:
 
     for attempt in range(3):
         try:
-            resp = client.models.generate_content(model=GEMINI_FALLBACK_MODEL, contents=prompt)
+            resp = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
             return _parse_response(resp.text.strip(), job_count)
         except json.JSONDecodeError as e:
             log.warning(f"Gemini JSON parse error: {e}")
@@ -165,28 +260,34 @@ def _try_groq(client, prompt: str, job_count: int, model: str | None = None) -> 
         return [None] * job_count
 
 
-def _score_batch(client, resume: dict, jobs: list[dict], provider_idx: int = 0) -> list[dict | None]:
-    """Score a batch.
+def _score_batch(client, resume: dict, jobs: list[dict]) -> list[dict | None]:
+    """Score a batch using the free-tier provider chain.
 
-    Strategy (optimised for free tiers, longer-run friendly):
-      1. Gemini 2.0 Flash — used for every batch; waits out rate limits rather
-         than burning Groq's much smaller daily token budget.
-      2. Groq llama-3.3-70b — emergency fallback only (Gemini unavailable/broken).
-      3. Groq llama-3.1-8b-instant — last resort.
+      1. Gemini 2.0 Flash   — 1500 req/day; waits out rate limits patiently
+      2. Claude OAuth        — reuses Claude Code subscription, no extra cost
+      3. Groq llama-3.3-70b — 100k tokens/day emergency fallback
+      4. Groq llama-3.1-8b  — 500k tokens/day last resort
     """
     prompt = _build_prompt(resume, jobs)
     job_count = len(jobs)
 
-    # Primary: Gemini (wait out rate limits, don't fall back just for throttling)
+    # 1. Gemini — primary, wait out per-minute limits but not daily quota
     if config.GEMINI_API_KEY:
         result = _try_gemini(prompt, job_count)
         if result is not None and result != "RATE_LIMITED":
             return result
         if result == "RATE_LIMITED":
-            # Gemini daily quota truly exhausted — fall through to Groq
-            log.warning("Gemini daily quota exhausted — falling back to Groq for remaining batches")
+            log.warning("Gemini daily quota exhausted — trying Claude OAuth")
 
-    # Emergency fallback: Groq (preserve for when Gemini is genuinely unavailable)
+    # 2. Claude OAuth — free via Claude Code subscription
+    result = _try_claude_oauth(prompt, job_count)
+    if result is not None and result != "RATE_LIMITED":
+        log.debug("Scored via Claude OAuth")
+        return result
+    if result == "RATE_LIMITED":
+        log.warning("Claude OAuth rate limited — falling back to Groq")
+
+    # 3 & 4. Groq — last resort
     if config.GROQ_API_KEY:
         for model in [config.GROQ_MODEL, GROQ_FALLBACK_MODEL]:
             result = _try_groq(client, prompt, job_count, model=model)
@@ -203,12 +304,20 @@ def run_scorer(resume: dict) -> list[dict]:
     log.info("PHASE 2: SCORE")
     log.info("=" * 50)
 
-    if not config.GROQ_API_KEY:
-        log.error("GROQ_API_KEY not set in .env — cannot score")
+    has_any_provider = (
+        config.GEMINI_API_KEY
+        or _CLAUDE_CREDS_PATH.exists()
+        or config.GROQ_API_KEY
+    )
+    if not has_any_provider:
+        log.error("No scorer available. Set GEMINI_API_KEY or GROQ_API_KEY in .env, "
+                  "or log in to Claude Code (claude login).")
         return []
 
-    from groq import Groq
-    client = Groq(api_key=config.GROQ_API_KEY)
+    client = None
+    if config.GROQ_API_KEY:
+        from groq import Groq
+        client = Groq(api_key=config.GROQ_API_KEY)
 
     seen = _already_scored()
     jobs = _unscored_jobs(seen)
